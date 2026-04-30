@@ -3,6 +3,8 @@ export namespace wireProtocol {
   export const archGeneric = 1;
 
   export const protocolFlag = 0x8000;
+  export const version11 = protocolFlag | 11;
+  export const version12 = protocolFlag | 12;
   export const version13 = protocolFlag | 13;
   export const version14 = protocolFlag | 14;
   export const version15 = protocolFlag | 15;
@@ -61,11 +63,17 @@ export namespace wireOp {
   export const acceptData = 94;
   export const crypt = 96;
   export const condAccept = 98;
+  export const inlineBlob = 114;
 }
 
 export namespace wirePacketType {
   export const batchSend = 3;
   export const lazySend = 5;
+}
+
+export namespace wireProtocolFeature {
+  export const invalidObjectHandle = 0xffff;
+  export const inlineBlobMaxSize = 65535;
 }
 
 export namespace connectParameter {

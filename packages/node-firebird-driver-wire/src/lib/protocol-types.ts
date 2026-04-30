@@ -47,6 +47,7 @@ export interface StatementColumn {
 
 export interface CursorHandle {
   readonly statement: StatementHandle;
+  readonly transaction: TransactionHandle;
   readonly columns: readonly StatementColumn[];
   readonly fetchBlr: Buffer;
   readonly fetchMessageLength: number;
@@ -60,6 +61,9 @@ export interface EventHandle {
 export type EventCallback = (counters: [string, number][]) => Promise<void> | void;
 
 export interface AcceptMessage {
+  readonly protocolVersion: number;
+  readonly architecture: number;
+  readonly packetType: number;
   readonly authenticated: boolean;
   readonly pluginName: string;
   readonly data: Buffer;
@@ -116,4 +120,11 @@ export interface EventSubscription {
   readonly names: readonly string[];
   readonly callback: EventCallback;
   eventBuffer: Buffer;
+}
+
+export interface InlineBlobResponse {
+  readonly transactionHandle: number;
+  readonly blobId: Buffer;
+  readonly info: Buffer;
+  readonly data: Buffer;
 }

@@ -21,6 +21,7 @@ import {
   wireCrypt,
   wireOp,
   wirePacketType,
+  wireProtocolFeature,
   wireProtocol,
 } from './constants';
 import { buildEventBlock, calculateEventCounts, getEventHost, parseAuxiliaryPort } from './event-helpers';
@@ -35,6 +36,7 @@ import {
   EventHandle,
   EventMessage,
   EventSubscription,
+  InlineBlobResponse,
   ResponseMessage,
   StatementHandle,
   StatementMetadata,
@@ -103,10 +105,13 @@ export class WireProtocol {
   private currentPlugin?: ClientAuthPlugin;
   private clientAuthListSent = false;
   private wireCryptEnabled = false;
+  private acceptedProtocolVersion?: number;
+  private acceptedPacketType = wirePacketType.batchSend;
   private readonly pendingServerKeys: Buffer[] = [];
   private readonly statementMetadata = new Map<number, StatementMetadata>();
   private readonly exhaustedCursors = new Set<number>();
   private readonly eventSubscriptions = new Map<number, EventSubscription>();
+  private readonly inlineBlobs = new Map<string, InlineBlobResponse>();
   private nextEventId = 1;
 
   constructor(private readonly options: WireProtocolOptions) {}
@@ -430,8 +435,14 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
+
       writer.writeInt32(wireOp.allocateStatement);
-      writer.writeInt32(this.attachmentHandle);
+      writer.writeInt32(0);
+
+      if (this.acceptedPacketType === wirePacketType.lazySend) {
+        writer.writeInt32(wireOp.ping);
+      }
+
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
@@ -441,7 +452,99 @@ export class WireProtocol {
 
       const response = await this.readResponse();
       assertSuccessfulResponse(response.status, 'Firebird allocate statement failed');
+
+      if (this.acceptedPacketType === wirePacketType.lazySend) {
+        const syncOperation = await this.readOperation();
+        if (syncOperation !== wireOp.response) {
+          throw new Error(`Unexpected operation ${syncOperation} while syncing statement allocation.`);
+        }
+
+        const syncResponse = await this.readResponse();
+        assertSuccessfulResponse(syncResponse.status, 'Firebird allocate statement sync failed');
+      }
+
       return { handle: response.handle };
+    });
+  }
+
+  async allocateAndPrepareStatement(
+    transaction: TransactionHandle,
+    sql: string,
+    sqlDialect = 3,
+  ): Promise<StatementHandle> {
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before allocating a statement.');
+      }
+
+      if (!(this.supportsProtocol(wireProtocol.version11) && this.acceptedPacketType === wirePacketType.lazySend)) {
+        const allocateWriter = new XdrWriter();
+        allocateWriter.writeInt32(wireOp.allocateStatement);
+        allocateWriter.writeInt32(0);
+        await this.channel.write(allocateWriter.toBuffer());
+
+        const allocateOperation = await this.readOperation();
+        if (allocateOperation !== wireOp.response) {
+          throw new Error(`Unexpected operation ${allocateOperation} while allocating a statement.`);
+        }
+
+        const allocateResponse = await this.readResponse();
+        assertSuccessfulResponse(allocateResponse.status, 'Firebird allocate statement failed');
+
+        const statement = { handle: allocateResponse.handle };
+
+        const prepareWriter = new XdrWriter();
+        prepareWriter.writeInt32(wireOp.prepareStatement);
+        prepareWriter.writeInt32(transaction.handle);
+        prepareWriter.writeInt32(statement.handle);
+        prepareWriter.writeInt32(sqlDialect);
+        prepareWriter.writeString(sql);
+        prepareWriter.writeBuffer(STATEMENT_BASE_INFO_ITEMS);
+        prepareWriter.writeInt32(INFO_BUFFER_LENGTH);
+        await this.channel.write(prepareWriter.toBuffer());
+
+        const prepareOperation = await this.readOperation();
+        if (prepareOperation !== wireOp.response) {
+          throw new Error(`Unexpected operation ${prepareOperation} while preparing a statement.`);
+        }
+
+        const prepareResponse = await this.readResponse();
+        await this.storePreparedStatementMetadata(statement, prepareResponse, 'Firebird prepare statement failed');
+
+        return statement;
+      }
+
+      const writer = new XdrWriter();
+      writer.writeInt32(wireOp.allocateStatement);
+      writer.writeInt32(0);
+      writer.writeInt32(wireOp.prepareStatement);
+      writer.writeInt32(transaction.handle);
+      writer.writeInt32(wireProtocolFeature.invalidObjectHandle);
+      writer.writeInt32(sqlDialect);
+      writer.writeString(sql);
+      writer.writeBuffer(STATEMENT_BASE_INFO_ITEMS);
+      writer.writeInt32(INFO_BUFFER_LENGTH);
+      await this.channel.write(writer.toBuffer());
+
+      const allocateOperation = await this.readOperation();
+      if (allocateOperation !== wireOp.response) {
+        throw new Error(`Unexpected operation ${allocateOperation} while allocating a statement.`);
+      }
+
+      const allocateResponse = await this.readResponse();
+      assertSuccessfulResponse(allocateResponse.status, 'Firebird allocate statement failed');
+
+      const statement = { handle: allocateResponse.handle };
+
+      const prepareOperation = await this.readOperation();
+      if (prepareOperation !== wireOp.response) {
+        throw new Error(`Unexpected operation ${prepareOperation} while preparing a statement.`);
+      }
+
+      const prepareResponse = await this.readResponse();
+      await this.storePreparedStatementMetadata(statement, prepareResponse, 'prepare statement failed');
+
+      return statement;
     });
   }
 
@@ -472,24 +575,7 @@ export class WireProtocol {
       }
 
       const response = await this.readResponse();
-      assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
-
-      // FIXME: Why two calls?
-      const selectInfo = await this.getInfo(
-        wireOp.infoSql,
-        statement.handle,
-        STATEMENT_SELECT_INFO_ITEMS,
-        'statement output metadata',
-      );
-      const bindInfo = await this.getInfo(
-        wireOp.infoSql,
-        statement.handle,
-        STATEMENT_BIND_INFO_ITEMS,
-        'statement input metadata',
-      );
-
-      const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
-      this.statementMetadata.set(statement.handle, parseStatementMetadata(metadataInfo));
+      await this.storePreparedStatementMetadata(statement, response, 'Firebird prepare statement failed');
     });
   }
 
@@ -574,6 +660,7 @@ export class WireProtocol {
 
       return {
         statement,
+        transaction,
         columns: metadata.outputColumns,
         fetchBlr: metadata.outputBlr,
         fetchMessageLength: metadata.outputMessageLength,
@@ -604,7 +691,7 @@ export class WireProtocol {
       writer.writeInt32(1);
       await this.channel.write(writer.toBuffer());
 
-      const operation = await this.readOperation();
+      const operation = await this.readOperationWithInlineBlobs();
       if (operation === wireOp.response) {
         const response = await this.readResponse();
         assertSuccessfulResponse(response.status, 'Firebird fetch cursor row failed');
@@ -705,8 +792,11 @@ export class WireProtocol {
     this.socket = undefined;
     this.attachmentHandle = undefined;
     this.wireCryptEnabled = false;
+    this.acceptedProtocolVersion = undefined;
+    this.acceptedPacketType = wirePacketType.batchSend;
     this.pendingServerKeys.length = 0;
     this.eventSubscriptions.clear();
+    this.inlineBlobs.clear();
   }
 
   private async openSocket(): Promise<void> {
@@ -811,6 +901,10 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
+
+    if (operationCode === wireOp.commit || operationCode === wireOp.rollback) {
+      this.clearInlineBlobsForTransaction(transaction.handle);
+    }
   }
 
   private async finishStatement(statement: StatementHandle, option: number, actionName: string): Promise<void> {
@@ -819,9 +913,15 @@ export class WireProtocol {
     }
 
     const writer = new XdrWriter();
+
     writer.writeInt32(wireOp.freeStatement);
     writer.writeInt32(statement.handle);
     writer.writeInt32(option);
+
+    if (this.acceptedPacketType === wirePacketType.lazySend) {
+      writer.writeInt32(wireOp.ping);
+    }
+
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
@@ -832,10 +932,44 @@ export class WireProtocol {
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
 
+    if (this.acceptedPacketType === wirePacketType.lazySend) {
+      const syncOperation = await this.readOperation();
+      if (syncOperation !== wireOp.response) {
+        throw new Error(`Unexpected operation ${syncOperation} while syncing ${actionName}.`);
+      }
+
+      const syncResponse = await this.readResponse();
+      assertSuccessfulResponse(syncResponse.status, `Firebird ${actionName} sync failed`);
+    }
+
     if ((option & dsql.drop) !== 0) {
       this.statementMetadata.delete(statement.handle);
       this.exhaustedCursors.delete(statement.handle);
     }
+  }
+
+  private async storePreparedStatementMetadata(
+    statement: StatementHandle,
+    response: ResponseMessage,
+    actionName: string,
+  ): Promise<void> {
+    assertSuccessfulResponse(response.status, actionName);
+
+    const selectInfo = await this.getInfo(
+      wireOp.infoSql,
+      statement.handle,
+      STATEMENT_SELECT_INFO_ITEMS,
+      'statement output metadata',
+    );
+    const bindInfo = await this.getInfo(
+      wireOp.infoSql,
+      statement.handle,
+      STATEMENT_BIND_INFO_ITEMS,
+      'statement input metadata',
+    );
+
+    const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
+    this.statementMetadata.set(statement.handle, parseStatementMetadata(metadataInfo));
   }
 
   private async openOrCreateBlob(
@@ -904,14 +1038,16 @@ export class WireProtocol {
 
     const metadata = this.getStatementMetadata(statement);
     const writer = new XdrWriter();
+    const hasInput = metadata.inputColumns.length > 0;
+
     writer.writeInt32(withOutput ? wireOp.execute2 : wireOp.execute);
     writer.writeInt32(statement.handle);
     writer.writeInt32(transaction.handle);
-    writer.writeBuffer(metadata.inputBlr);
+    writer.writeBuffer(hasInput ? metadata.inputBlr : Buffer.alloc(0));
     writer.writeInt32(0);
-    writer.writeInt32(metadata.inputColumns.length > 0 ? 1 : 0);
+    writer.writeInt32(hasInput ? 1 : 0);
 
-    if (metadata.inputColumns.length > 0) {
+    if (hasInput) {
       writer.writeBytes(buildPackedMessage(metadata.inputColumns, metadata.inputMessageLength, inputMessage));
     }
 
@@ -920,13 +1056,22 @@ export class WireProtocol {
       writer.writeInt32(0);
     }
 
-    writer.writeInt32(0);
-    writer.writeInt32(0);
-    writer.writeInt32(0);
+    if (this.supportsProtocol(wireProtocol.version16)) {
+      writer.writeInt32(0);
+    }
+
+    if (this.supportsProtocol(wireProtocol.version18)) {
+      writer.writeInt32(0);
+    }
+
+    if (this.supportsProtocol(wireProtocol.version19)) {
+      writer.writeInt32(wireProtocolFeature.inlineBlobMaxSize);
+    }
+
     await this.channel.write(writer.toBuffer());
 
     let outputMessage: Buffer | undefined;
-    let operation = await this.readOperation();
+    let operation = await this.readOperationWithInlineBlobs();
 
     if (withOutput && operation === wireOp.sqlResponse) {
       const messages = (await this.channel.readExactly(4)).readInt32BE(0);
@@ -939,7 +1084,7 @@ export class WireProtocol {
         );
       }
 
-      operation = await this.readOperation();
+      operation = await this.readOperationWithInlineBlobs();
     }
 
     if (operation !== wireOp.response) {
@@ -1002,9 +1147,8 @@ export class WireProtocol {
     for (const protocolVersion of wireProtocol.supportedProtocols) {
       writer.writeInt32(protocolVersion);
       writer.writeInt32(wireProtocol.archGeneric);
-      writer.writeInt32(0);
-      writer.writeInt32(wirePacketType.batchSend);
-      // FIXME: ptype_lazy_send
+      writer.writeInt32(wirePacketType.lazySend);
+      writer.writeInt32(wirePacketType.lazySend);
       writer.writeInt32(weight--);
     }
 
@@ -1025,6 +1169,9 @@ export class WireProtocol {
     this.currentPlugin = createAuthPlugin(this.currentPluginName, this.options.password);
     this.clientAuthListSent = false;
     this.pendingServerKeys.length = 0;
+    this.acceptedProtocolVersion = undefined;
+    this.acceptedPacketType = wirePacketType.batchSend;
+    this.inlineBlobs.clear();
 
     await this.writeConnect(database);
 
@@ -1032,11 +1179,13 @@ export class WireProtocol {
       const operation = await this.readOperation();
 
       if (operation === wireOp.accept) {
+        this.noteAcceptedProtocol(await this.readAcceptMessage(false));
         return this.currentPlugin.initialData;
       }
 
       if (operation === wireOp.acceptData || operation === wireOp.condAccept) {
-        const accept = await this.readAcceptMessage();
+        const accept = await this.readAcceptMessage(true);
+        this.noteAcceptedProtocol(accept);
         this.recordServerKeys(accept.keys);
         const attachAuthData = accept.authenticated ? undefined : this.processAcceptPlugin(accept);
 
@@ -1254,6 +1403,10 @@ export class WireProtocol {
     await subscription.callback(counters);
   }
 
+  findInlineBlob(transactionHandle: number, blobId: Uint8Array): InlineBlobResponse | undefined {
+    return this.inlineBlobs.get(this.inlineBlobKey(transactionHandle, blobId));
+  }
+
   private getSystemUserName(): string {
     try {
       return userInfo().username ?? 'node-firebird-driver-wire';
@@ -1264,6 +1417,17 @@ export class WireProtocol {
 
   private async readOperation(): Promise<number> {
     return await this.readOperationFrom(this.channel!);
+  }
+
+  private async readOperationWithInlineBlobs(): Promise<number> {
+    while (true) {
+      const operation = await this.readOperation();
+      if (operation !== wireOp.inlineBlob) {
+        return operation;
+      }
+
+      this.storeInlineBlob(await this.readInlineBlobResponse());
+    }
   }
 
   private async sendQueueEvents(subscription: EventSubscription): Promise<void> {
@@ -1295,13 +1459,29 @@ export class WireProtocol {
     }
   }
 
-  private async readAcceptMessage(): Promise<AcceptMessage> {
-    await this.channel!.readExactly(12);
+  private async readAcceptMessage(withAuthenticationData: boolean): Promise<AcceptMessage> {
+    const protocolVersion = (await this.channel!.readExactly(4)).readInt32BE(0);
+    const architecture = (await this.channel!.readExactly(4)).readInt32BE(0);
+    const packetType = (await this.channel!.readExactly(4)).readInt32BE(0);
+
+    if (!withAuthenticationData) {
+      return {
+        protocolVersion,
+        architecture,
+        packetType,
+        authenticated: false,
+        pluginName: '',
+        data: Buffer.alloc(0),
+        keys: Buffer.alloc(0),
+      };
+    }
+
     const data = await this.readXdrBuffer();
     const pluginName = await this.readXdrString();
     const authenticated = (await this.channel!.readExactly(4)).readInt32BE(0) === 1;
     const keys = await this.readXdrBuffer();
-    return { authenticated, pluginName, data, keys };
+
+    return { protocolVersion, architecture, packetType, authenticated, pluginName, data, keys };
   }
 
   private async readContinueAuthenticationMessage(): Promise<AcceptMessage> {
@@ -1309,7 +1489,16 @@ export class WireProtocol {
     const pluginName = await this.readXdrString();
     await this.readXdrString();
     const keys = await this.readXdrBuffer();
-    return { authenticated: false, pluginName, data, keys };
+
+    return {
+      protocolVersion: this.acceptedProtocolVersion ?? 0,
+      architecture: wireProtocol.archGeneric,
+      packetType: this.acceptedPacketType,
+      authenticated: false,
+      pluginName,
+      data,
+      keys,
+    };
   }
 
   private async readResponse(): Promise<ResponseMessage> {
@@ -1323,6 +1512,15 @@ export class WireProtocol {
     await channel.readExactly(4);
     const requestId = (await channel.readExactly(4)).readInt32BE(0);
     return { database, items, requestId };
+  }
+
+  private async readInlineBlobResponse(): Promise<InlineBlobResponse> {
+    const transactionHandle = (await this.channel!.readExactly(4)).readInt32BE(0);
+    const blobId = await this.channel!.readExactly(8);
+    const info = await this.readXdrBuffer();
+    const data = await this.readXdrBuffer();
+
+    return { transactionHandle, blobId, info, data };
   }
 
   private async readXdrBuffer(): Promise<Buffer> {
@@ -1376,7 +1574,7 @@ export class WireProtocol {
   }
 
   private async readFetchBatchMarker(statementHandle: number): Promise<void> {
-    const operation = await this.readOperation();
+    const operation = await this.readOperationWithInlineBlobs();
     if (operation !== wireOp.fetchResponse) {
       throw new Error(`Unexpected operation ${operation} while completing a cursor fetch batch.`);
     }
@@ -1395,5 +1593,32 @@ export class WireProtocol {
     if (status !== 0) {
       throw new Error(`Firebird cursor fetch batch failed with status ${status}.`);
     }
+  }
+
+  private supportsProtocol(version: number): boolean {
+    return (this.acceptedProtocolVersion ?? 0) >= version;
+  }
+
+  private noteAcceptedProtocol(accept: AcceptMessage): void {
+    this.acceptedProtocolVersion = accept.protocolVersion < 0 ? accept.protocolVersion & 0xffff : accept.protocolVersion;
+    this.acceptedPacketType = accept.packetType & 0xff;
+  }
+
+  private storeInlineBlob(blob: InlineBlobResponse): void {
+    this.inlineBlobs.set(this.inlineBlobKey(blob.transactionHandle, blob.blobId), blob);
+  }
+
+  private clearInlineBlobsForTransaction(transactionHandle: number): void {
+    const prefix = `${transactionHandle}:`;
+
+    for (const key of this.inlineBlobs.keys()) {
+      if (key.startsWith(prefix)) {
+        this.inlineBlobs.delete(key);
+      }
+    }
+  }
+
+  private inlineBlobKey(transactionHandle: number, blobId: Uint8Array): string {
+    return `${transactionHandle}:${Buffer.from(blobId).toString('hex')}`;
   }
 }

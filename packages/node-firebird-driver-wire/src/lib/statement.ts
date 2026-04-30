@@ -41,8 +41,11 @@ export class StatementImpl extends AbstractStatement {
     sqlStmt: string,
     _options?: PrepareOptions,
   ): Promise<StatementImpl> {
-    const statementHandle = await attachment.protocol!.allocateStatement();
-    await attachment.protocol!.prepareStatement(transaction.transactionHandle!, statementHandle, sqlStmt, 3);
+    const statementHandle = await attachment.protocol!.allocateAndPrepareStatement(
+      transaction.transactionHandle!,
+      sqlStmt,
+      3,
+    );
 
     const metadata = attachment.protocol!.getStatementMetadata(statementHandle);
     const statement = new StatementImpl(

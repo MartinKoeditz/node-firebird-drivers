@@ -33,10 +33,12 @@ function decodePackedBlobSegments(buffer: Buffer): Buffer[] {
 export class BlobStreamImpl extends AbstractBlobStream {
   override attachment: AttachmentImpl;
   blobHandle?: BlobHandle;
+  private inlineBlob?: { info: Buffer; data: Buffer };
   private position = 0;
   private readBuffer = Buffer.alloc(0);
   private eofPending = false;
   private eofReached = false;
+  private closed = false;
 
   static async create(
     attachment: AttachmentImpl,
@@ -52,28 +54,48 @@ export class BlobStreamImpl extends AbstractBlobStream {
 
   static async open(attachment: AttachmentImpl, transaction: TransactionImpl, blob: Blob): Promise<BlobStreamImpl> {
     const blobStream = new BlobStreamImpl(blob, attachment);
+    const inlineBlob = attachment.protocol!.findInlineBlob(transaction.transactionHandle!.handle, blob.id);
+
+    if (inlineBlob) {
+      blobStream.inlineBlob = {
+        info: inlineBlob.info,
+        data: inlineBlob.data,
+      };
+
+      return blobStream;
+    }
+
     blobStream.blobHandle = await attachment.protocol!.openBlob(transaction.transactionHandle!, blob.id);
+
     return blobStream;
   }
 
   protected override async internalGetLength(): Promise<number> {
-    const infoRet = await this.attachment.protocol!.getBlobInfo(this.blobHandle!, BLOB_LENGTH_INFO_ITEMS);
-
-    if (infoRet[0] != blobInfo.totalLength) {
-      throw new Error('Unrecognized response from blob info.');
+    if (this.inlineBlob) {
+      return getInlineBlobLength(this.inlineBlob.data);
     }
 
-    const size = getPortableInteger(infoRet.subarray(1), 2);
+    const infoRet = await this.attachment.protocol!.getBlobInfo(this.blobHandle!, BLOB_LENGTH_INFO_ITEMS);
 
-    return getPortableInteger(infoRet.subarray(3), size);
+    return readBlobTotalLength(infoRet);
   }
 
   protected override async internalClose(): Promise<void> {
+    if (this.inlineBlob) {
+      this.closed = true;
+      return;
+    }
+
     await this.attachment.protocol!.closeBlob(this.blobHandle!);
     this.blobHandle = undefined;
   }
 
   protected override async internalCancel(): Promise<void> {
+    if (this.inlineBlob) {
+      this.closed = true;
+      return;
+    }
+
     await this.attachment.protocol!.cancelBlob(this.blobHandle!);
     this.blobHandle = undefined;
   }
@@ -84,6 +106,17 @@ export class BlobStreamImpl extends AbstractBlobStream {
     this.eofReached = false;
 
     const mode = whence ?? BlobSeekWhence.START;
+
+    if (this.inlineBlob) {
+      const data = Buffer.concat(decodePackedBlobSegments(this.inlineBlob.data));
+      const basePosition =
+        mode === BlobSeekWhence.CURRENT ? this.position : mode === BlobSeekWhence.END ? data.length : 0;
+      const position = Math.max(0, Math.min(data.length, basePosition + offset));
+      this.position = position;
+
+      return position;
+    }
+
     const seekMode = mode === BlobSeekWhence.CURRENT ? BlobSeekWhence.START : mode;
     const seekOffset = mode === BlobSeekWhence.CURRENT ? this.position + offset : offset;
     const position = await this.attachment.protocol!.seekBlob(this.blobHandle!, seekMode, seekOffset);
@@ -93,6 +126,20 @@ export class BlobStreamImpl extends AbstractBlobStream {
   }
 
   protected override async internalRead(buffer: Buffer): Promise<number> {
+    if (this.inlineBlob) {
+      const data = Buffer.concat(decodePackedBlobSegments(this.inlineBlob.data));
+
+      if (this.position >= data.length) {
+        return -1;
+      }
+
+      const readBytes = Math.min(buffer.length, data.length - this.position);
+      data.copy(buffer, 0, this.position, this.position + readBytes);
+      this.position += readBytes;
+
+      return readBytes;
+    }
+
     while (this.readBuffer.length < buffer.length && !this.eofPending && !this.eofReached) {
       const response = await this.attachment.protocol!.getSegment(this.blobHandle!, MAX_SEGMENT_SIZE);
       const segmentData = Buffer.concat(decodePackedBlobSegments(response.data));
@@ -146,6 +193,20 @@ export class BlobStreamImpl extends AbstractBlobStream {
   }
 
   override get isValid(): boolean {
-    return !!this.blobHandle && this.attachment.isValid;
+    return ((!!this.blobHandle && this.attachment.isValid) || !!this.inlineBlob) && !this.closed;
   }
+}
+
+function readBlobTotalLength(infoRet: Buffer): number {
+  if (infoRet[0] != blobInfo.totalLength) {
+    throw new Error('Unrecognized response from blob info.');
+  }
+
+  const size = getPortableInteger(infoRet.subarray(1), 2);
+
+  return getPortableInteger(infoRet.subarray(3), size);
+}
+
+function getInlineBlobLength(data: Buffer): number {
+  return decodePackedBlobSegments(data).reduce((length, segment) => length + segment.length, 0);
 }
