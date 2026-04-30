@@ -2,9 +2,8 @@ import { Buffer } from 'node:buffer';
 import { connect as connectSocket, Socket } from 'node:net';
 import { hostname, userInfo } from 'node:os';
 
-import { commonInfo, statementInfo } from 'node-firebird-driver/dist/lib/impl';
+import { cancelType, commonInfo, statementInfo } from 'node-firebird-driver/dist/lib/impl';
 
-import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
   buildAttachmentDpb,
   buildConnectPluginList,
@@ -12,6 +11,7 @@ import {
   normalizeLogin,
   writeMultiPartConnectParameter,
 } from './auth-helpers';
+import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
   authPlugin,
   connectParameter,
@@ -42,8 +42,8 @@ import {
   WireProtocolOptions,
 } from './protocol-types';
 import { SocketChannel } from './socket-channel';
-import { assertSuccessfulResponse, parseStatusVector } from './status';
 import { parseStatementMetadata } from './statement-metadata';
+import { assertSuccessfulResponse, parseStatusVector } from './status';
 import { createWireCryptSession } from './wire-crypt';
 import { writeTraditionalClumplet, XdrWriter } from './xdr';
 
@@ -258,13 +258,12 @@ export class WireProtocol {
     });
   }
 
-  // FIXME: kind?
   async cancelOperation(kind: number): Promise<void> {
     if (!this.channel) {
       throw new Error('Wire protocol socket is not open.');
     }
 
-    if (kind === 4) {
+    if (kind === cancelType.abort) {
       await this.close();
       return;
     }
