@@ -47,6 +47,7 @@ jobs:
           wget -nv -O Firebird-4.0.6.3221-0.amd64.tar.gz "https://github.com/FirebirdSQL/firebird/releases/download/v4.0.6/Firebird-4.0.6.3221-0.amd64.tar.gz"
           tar xzvf Firebird-4.0.6.3221-0.amd64.tar.gz
           (cd Firebird-4.0.6.3221-0.amd64; sudo ./install.sh -silent)
+          sudo awk '/^ISC_USER=|^ISC_PASSWORD=/{print}' /opt/firebird/SYSDBA.password >> "$GITHUB_ENV"
           sudo usermod -a -G firebird `whoami`
           sudo gpasswd -r firebird
 
@@ -65,7 +66,13 @@ jobs:
           powershell Invoke-WebRequest "https://github.com/FirebirdSQL/firebird/releases/download/v4.0.6/$env:FB_ZIP" -OutFile "$env:FB_ZIP"
           7z x -oC:\Firebird %FB_ZIP%
           cd /d C:\Firebird
-          call install_service.bat
+          instreg install -z
+          > init-security.sql echo create user SYSDBA password 'masterkey';
+          >> init-security.sql echo quit;
+          isql -user sysdba employee -i init-security.sql
+          del init-security.sql
+          instsvc install -z
+          instsvc start
 
       - name: Build
         shell: bash
