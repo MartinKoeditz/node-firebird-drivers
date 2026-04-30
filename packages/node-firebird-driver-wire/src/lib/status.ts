@@ -1,3 +1,4 @@
+import { errorMessagesByCode } from './error-messages';
 import { statusArgument } from './constants';
 
 const {
@@ -15,7 +16,13 @@ export interface ParsedStatusVector {
   readonly gdsCodes: number[];
   readonly warnings: number[];
   readonly messages: string[];
+  readonly statusArguments: readonly StatusVectorArgument[];
 }
+
+export type StatusVectorArgument =
+  | { readonly type: 'gds'; readonly code: number }
+  | { readonly type: 'warning'; readonly code: number }
+  | { readonly type: 'string' | 'interpreted' | 'number'; readonly value: string };
 
 export class FirebirdWireError extends Error {
   constructor(
@@ -27,35 +34,77 @@ export class FirebirdWireError extends Error {
   }
 }
 
-// FIXME:
-function formatKnownStatus(status: ParsedStatusVector): string | undefined {
-  if (status.gdsCodes.length === 1 && status.gdsCodes[0] === 335544794) {
-    return 'operation was cancelled';
+function formatDecodedStatus(status: ParsedStatusVector): string | undefined {
+  const lines: string[] = [];
+  let currentSegment: { readonly code: number; readonly parameters: string[] } | undefined;
+
+  const flushCurrentSegment = () => {
+    if (!currentSegment) {
+      return true;
+    }
+
+    const template = errorMessagesByCode[currentSegment.code];
+
+    if (!template) {
+      return false;
+    }
+
+    lines.push(formatTemplate(template, currentSegment.parameters));
+    currentSegment = undefined;
+    return true;
+  };
+
+  for (const argument of status.statusArguments) {
+    if (argument.type === 'gds') {
+      if (!flushCurrentSegment()) {
+        return undefined;
+      }
+
+      currentSegment = { code: argument.code, parameters: [] };
+      continue;
+    }
+
+    if (argument.type === 'warning') {
+      if (!flushCurrentSegment()) {
+        return undefined;
+      }
+
+      continue;
+    }
+
+    if (argument.type === 'interpreted') {
+      if (!flushCurrentSegment()) {
+        return undefined;
+      }
+
+      lines.push(argument.value);
+      continue;
+    }
+
+    if (currentSegment) {
+      currentSegment.parameters.push(argument.value);
+    }
   }
 
-  if (
-    status.gdsCodes.length >= 4 &&
-    status.gdsCodes[0] === 335544569 &&
-    status.gdsCodes[1] === 335544436 &&
-    status.gdsCodes[2] === 335544634 &&
-    status.gdsCodes[3] === 335544382 &&
-    status.messages.length >= 4
-  ) {
-    return (
-      `Dynamic SQL Error\n` +
-      `-SQL error code = ${status.messages[0]}\n` +
-      `-Token unknown - line ${status.messages[1]}, column ${status.messages[2]}\n` +
-      `-${status.messages[3]}`
-    );
+  if (!flushCurrentSegment() || lines.length === 0) {
+    return undefined;
   }
 
-  return undefined;
+  return lines.map((line, index) => (index === 0 ? line : `-${line}`)).join('\n');
+}
+
+function formatTemplate(template: string, parameters: readonly string[]): string {
+  return template.replace(/@(\d+)/g, (placeholder, positionText: string) => {
+    const parameter = parameters[Number(positionText) - 1];
+    return parameter ?? placeholder;
+  });
 }
 
 export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
   const gdsCodes: number[] = [];
   const warnings: number[] = [];
   const messages: string[] = [];
+  const statusArguments: StatusVectorArgument[] = [];
   let isError = false;
   let offset = 0;
 
@@ -76,6 +125,7 @@ export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
       if (code !== 0) {
         isError = true;
         gdsCodes.push(code);
+        statusArguments.push({ type: 'gds', code });
       }
       continue;
     }
@@ -84,6 +134,7 @@ export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
       const code = readInt32();
       if (code !== 0) {
         warnings.push(code);
+        statusArguments.push({ type: 'warning', code });
       }
       continue;
     }
@@ -93,6 +144,7 @@ export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
       const text = buffer.subarray(offset, offset + textLength).toString('utf8');
       offset += textLength;
       messages.push(text);
+      statusArguments.push({ type: tag === isc_arg_interpreted ? 'interpreted' : 'string', value: text });
       continue;
     }
 
@@ -101,18 +153,21 @@ export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
       const text = buffer.subarray(offset, offset + textLength).toString('utf8');
       offset += textLength;
       messages.push(text);
+      statusArguments.push({ type: 'string', value: text });
       continue;
     }
 
     if (tag === isc_arg_number) {
-      messages.push(String(readInt32()));
+      const value = String(readInt32());
+      messages.push(value);
+      statusArguments.push({ type: 'number', value });
       continue;
     }
 
     readInt32();
   }
 
-  return { isError, gdsCodes, warnings, messages };
+  return { isError, gdsCodes, warnings, messages, statusArguments };
 }
 
 export function assertSuccessfulResponse(status: ParsedStatusVector, fallbackMessage: string): void {
@@ -120,7 +175,7 @@ export function assertSuccessfulResponse(status: ParsedStatusVector, fallbackMes
     return;
   }
 
-  const knownStatus = formatKnownStatus(status);
+  const knownStatus = formatDecodedStatus(status);
 
   if (knownStatus) {
     throw new FirebirdWireError(knownStatus, status);

@@ -426,7 +426,7 @@ describe('node-firebird-driver-wire', () => {
         try {
           await expect(
             wireProtocol.prepareStatement(transaction, statement, 'create select t1 (n1 integer)'),
-          ).rejects.toThrow(/Firebird|Dynamic SQL Error|SQL error code/);
+          ).rejects.toThrow(/Dynamic SQL Error\n-SQL error code = -104\n-Token unknown/);
         } finally {
           await wireProtocol.freeStatement(statement);
         }
