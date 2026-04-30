@@ -1,0 +1,74 @@
+export const CONNECT_VERSION3 = 3;
+export const arch_generic = 1;
+
+export const op_connect = 1;
+export const op_accept = 3;
+export const op_reject = 4;
+export const op_disconnect = 6;
+export const op_response = 9;
+export const op_attach = 19;
+export const op_create = 20;
+export const op_detach = 21;
+export const op_dummy = 71;
+export const op_drop_database = 81;
+export const op_cont_auth = 92;
+export const op_ping = 93;
+export const op_accept_data = 94;
+export const op_cond_accept = 98;
+
+export const ptype_batch_send = 3;
+export const ptype_lazy_send = 5;
+
+export const FB_PROTOCOL_FLAG = 0x8000;
+export const PROTOCOL_VERSION13 = FB_PROTOCOL_FLAG | 13;
+export const PROTOCOL_VERSION14 = FB_PROTOCOL_FLAG | 14;
+export const PROTOCOL_VERSION15 = FB_PROTOCOL_FLAG | 15;
+export const PROTOCOL_VERSION16 = FB_PROTOCOL_FLAG | 16;
+export const PROTOCOL_VERSION17 = FB_PROTOCOL_FLAG | 17;
+export const PROTOCOL_VERSION18 = FB_PROTOCOL_FLAG | 18;
+export const PROTOCOL_VERSION19 = FB_PROTOCOL_FLAG | 19;
+export const SUPPORTED_PROTOCOLS = [
+  PROTOCOL_VERSION19,
+  PROTOCOL_VERSION18,
+  PROTOCOL_VERSION17,
+  PROTOCOL_VERSION16,
+  PROTOCOL_VERSION15,
+  PROTOCOL_VERSION14,
+  PROTOCOL_VERSION13,
+];
+
+export const CNCT_user = 1;
+export const CNCT_host = 4;
+export const CNCT_user_verification = 6;
+export const CNCT_specific_data = 7;
+export const CNCT_plugin_name = 8;
+export const CNCT_login = 9;
+export const CNCT_plugin_list = 10;
+export const CNCT_client_crypt = 11;
+
+export const WIRE_CRYPT_DISABLED = 0;
+export const WIRE_CRYPT_ENABLED = 1;
+
+export const isc_dpb_version1 = 1;
+export const isc_dpb_version2 = 2;
+export const isc_dpb_page_size = 4;
+export const isc_dpb_user_name = 28;
+export const isc_dpb_lc_ctype = 48;
+export const isc_dpb_overwrite = 54;
+export const isc_dpb_sql_dialect = 63;
+export const isc_dpb_dummy_packet_interval = 58;
+export const isc_dpb_utf8_filename = 77;
+export const isc_dpb_specific_auth_data = 84;
+export const isc_dpb_auth_plugin_list = 85;
+export const isc_dpb_auth_plugin_name = 86;
+
+export const isc_arg_end = 0;
+export const isc_arg_gds = 1;
+export const isc_arg_string = 2;
+export const isc_arg_cstring = 3;
+export const isc_arg_number = 4;
+export const isc_arg_interpreted = 5;
+export const isc_arg_warning = 18;
+
+export const AUTH_PLUGINS = ['Srp256', 'Srp', 'Legacy_Auth'] as const;
+export type AuthPluginName = (typeof AUTH_PLUGINS)[number];

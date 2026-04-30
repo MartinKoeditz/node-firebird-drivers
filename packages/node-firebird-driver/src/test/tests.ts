@@ -10,10 +10,7 @@ import {
 } from '../lib';
 
 import * as fs from 'fs-extra-promise';
-import * as tmp from 'temp-fs';
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-require('dotenv').config({ path: '../../.env', quiet: true });
+import { ensureDriverTestTmpDir, getDriverTestDatabaseUri, loadDriverTestConfig } from './test-config';
 
 export function runCommonTests(client: Client) {
   function dateToString(d: Date) {
@@ -52,39 +49,15 @@ export function runCommonTests(client: Client) {
   }
 
   describe('node-firebird-driver', () => {
-    const testConfig = {
-      username: process.env.ISC_USER,
-      password: process.env.ISC_PASSWORD,
-      host: process.env.NODE_FB_TEST_HOST,
-      port: process.env.NODE_FB_TEST_PORT,
-      tmpDir: process.env.NODE_FB_TEST_TMP_DIR,
-    };
-
-    function isLocal(): boolean {
-      return testConfig.host == undefined || testConfig.host == 'localhost' || testConfig.host == '127.0.0.1';
-    }
-
-    function getTempFile(name: string): string {
-      const database = `${testConfig.tmpDir}/${name}`;
-      return (
-        (testConfig.host ?? '') +
-        (testConfig.host && testConfig.port ? `/${testConfig.port}` : '') +
-        (testConfig.host ? ':' : '') +
-        database
-      );
-    }
+    const testConfig = loadDriverTestConfig();
+    let createdTmpDir = false;
 
     jest.setTimeout(10000);
 
     beforeAll(() => {
       expect(client.isValid).toBeTruthy();
 
-      if (isLocal() && !testConfig.tmpDir) {
-        testConfig.tmpDir = tmp.mkdirSync().path.toString();
-
-        // Important for MacOS tests with non-embedded server.
-        fs.chmodSync(testConfig.tmpDir, 0o777);
-      }
+      createdTmpDir = ensureDriverTestTmpDir(testConfig).createdTmpDir;
 
       const defaultOptions = {
         password: testConfig.password,
@@ -106,19 +79,21 @@ export function runCommonTests(client: Client) {
 
       expect(client.isValid).toBeFalsy();
 
-      if (isLocal() && !testConfig.tmpDir) {
+      if (createdTmpDir) {
         fs.rmdirSync(testConfig.tmpDir!);
       }
     });
 
     describe('Client', () => {
       test('#createDatabase()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Client-createDatabase.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Client-createDatabase.fdb'),
+        );
         await attachment.dropDatabase();
       });
 
       test('#connect()', async () => {
-        const filename = getTempFile('Client-connect.fdb');
+        const filename = getDriverTestDatabaseUri(testConfig, 'Client-connect.fdb');
         const attachment1 = await client.createDatabase(filename);
         const attachment2 = await client.connect(filename);
 
@@ -133,7 +108,7 @@ export function runCommonTests(client: Client) {
       });
 
       test('setDatabaseReadWriteMode', async () => {
-        const filename = getTempFile('setDatabaseReadWriteMode.fdb');
+        const filename = getDriverTestDatabaseUri(testConfig, 'setDatabaseReadWriteMode.fdb');
         const attachment1 = await client.createDatabase(filename);
         await attachment1.disconnect();
 
@@ -166,7 +141,9 @@ export function runCommonTests(client: Client) {
 
     describe('Attachment', () => {
       test('#startTransaction()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-startTransaction.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-startTransaction.fdb'),
+        );
 
         const isolationQuery = "select rdb$get_context('SYSTEM', 'ISOLATION_LEVEL') from rdb$database";
 
@@ -196,7 +173,7 @@ export function runCommonTests(client: Client) {
       });
 
       test('#prepare()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-prepare.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'Attachment-prepare.fdb'));
         const transaction = await attachment.startTransaction();
 
         const statement = await attachment.prepare(transaction, 'create table t1 (n1 integer)');
@@ -221,7 +198,7 @@ export function runCommonTests(client: Client) {
       });
 
       test('statement.type', async () => {
-        const attachment = await client.createDatabase(getTempFile('Statement-type.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'Statement-type.fdb'));
         const transaction = await attachment.startTransaction();
 
         const s1 = await attachment.prepare(transaction, 'select * from rdb$database');
@@ -254,7 +231,7 @@ export function runCommonTests(client: Client) {
       //// TODO: #executeTransaction
 
       test('#execute()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-execute.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'Attachment-execute.fdb'));
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -267,7 +244,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeQuery()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeQuery.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeQuery.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -283,7 +262,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeSingleton()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeSingleton.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeSingleton.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -298,7 +279,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeSingletonAsObject()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeSingletonAsObject.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeSingletonAsObject.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -314,7 +297,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeReturning()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeReturning.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeReturning.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -329,7 +314,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeReturningAsObject()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeReturningAsObject.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeReturningAsObject.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -345,7 +332,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#queueEvents()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-queueEvents.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-queueEvents.fdb'),
+        );
 
         const eventNames: [string, number][] = [
           ['EVENT1', 16],
@@ -428,7 +417,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#cancelOperation()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-cancelOperation.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-cancelOperation.fdb'),
+        );
         const transaction1 = await attachment.startTransaction();
 
         await attachment.execute(transaction1, 'create table t1(n1 integer)');
@@ -461,14 +452,16 @@ export function runCommonTests(client: Client) {
 
     describe('Transaction', () => {
       test('#commit()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Transaction-commit.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'Transaction-commit.fdb'));
         const transaction = await attachment.startTransaction();
         await transaction.commit();
         await attachment.dropDatabase();
       });
 
       test('#commitRetaining()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Transaction-commitRetaining.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Transaction-commitRetaining.fdb'),
+        );
         const transaction = await attachment.startTransaction();
         await transaction.commitRetaining();
         await transaction.commit();
@@ -476,14 +469,18 @@ export function runCommonTests(client: Client) {
       });
 
       test('#rollback()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Transaction-rollback.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Transaction-rollback.fdb'),
+        );
         const transaction = await attachment.startTransaction();
         await transaction.rollback();
         await attachment.dropDatabase();
       });
 
       test('#rollbackRetaining()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Transaction-rollbackRetaining.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Transaction-rollbackRetaining.fdb'),
+        );
         const transaction = await attachment.startTransaction();
         await transaction.rollbackRetaining();
         await transaction.rollback();
@@ -491,7 +488,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('transaction left opened', async () => {
-        const attachment = await client.createDatabase(getTempFile('Transaction-left-opened.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Transaction-left-opened.fdb'),
+        );
         await attachment.startTransaction();
         await attachment.dropDatabase();
       });
@@ -499,7 +498,7 @@ export function runCommonTests(client: Client) {
 
     describe('Statement', () => {
       test('#execute()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Statement-execute.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'Statement-execute.fdb'));
         const transaction = await attachment.startTransaction();
 
         const statement1 = await attachment.prepare(transaction, 'create table t1 (n1 integer)');
@@ -530,7 +529,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeQuery()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Statement-executeQuery.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Statement-executeQuery.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         const statement1 = await attachment.prepare(transaction, 'create table t1 (n1 integer)');
@@ -548,7 +549,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeSingleton()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeSingleton.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeSingleton.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -568,7 +571,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#executeReturning()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Attachment-executeReturning.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Attachment-executeReturning.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -588,7 +593,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#columnLabels()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Statement-columnLabels.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Statement-columnLabels.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         const statement1 = await attachment.prepare(transaction, 'create table t1 (n1 integer)');
@@ -606,7 +613,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#hasResultSet()', async () => {
-        const attachment = await client.createDatabase(getTempFile('Statement-hasResultSet.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'Statement-hasResultSet.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         const statement1 = await attachment.prepare(transaction, 'create table t1 (n1 integer)');
@@ -650,7 +659,7 @@ export function runCommonTests(client: Client) {
 
     describe('ResultSet', () => {
       test('#fetch()', async () => {
-        const attachment = await client.createDatabase(getTempFile('ResultSet-fetch.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'ResultSet-fetch.fdb'));
 
         let transaction = await attachment.startTransaction();
 
@@ -958,7 +967,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#fetchAsObject()', async () => {
-        const attachment = await client.createDatabase(getTempFile('ResultSet-fetchAsObject.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'ResultSet-fetchAsObject.fdb'),
+        );
         const transaction = await attachment.startTransaction();
         const resultSet = await attachment.executeQuery(transaction, 'select 1 as a, 2 as b from rdb$database');
         const output = await resultSet.fetchAsObject<{
@@ -974,7 +985,7 @@ export function runCommonTests(client: Client) {
       });
 
       test('NONE charset uses charSetForNONE for read/write', async () => {
-        const filename = getTempFile('ResultSet-none-charset.fdb');
+        const filename = getDriverTestDatabaseUri(testConfig, 'ResultSet-none-charset.fdb');
 
         {
           const attachment = await client.createDatabase(filename);
@@ -1036,7 +1047,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#fetch() with fetchSize', async () => {
-        const attachment = await client.createDatabase(getTempFile('ResultSet-fetch-with-fetchSize.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'ResultSet-fetch-with-fetchSize.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (n1 integer)');
@@ -1075,7 +1088,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#fetch() with fetchSize and exception', async () => {
-        const attachment = await client.createDatabase(getTempFile('ResultSet-fetch-with-fetchSize.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'ResultSet-fetch-with-fetchSize.fdb'),
+        );
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, "create exception e1 'e1'");
@@ -1109,7 +1124,9 @@ export function runCommonTests(client: Client) {
       });
 
       test('#fetch() with large blob', async () => {
-        const attachment = await client.createDatabase(getTempFile('ResultSet-fetch-with-large-blob.fdb'));
+        const attachment = await client.createDatabase(
+          getDriverTestDatabaseUri(testConfig, 'ResultSet-fetch-with-large-blob.fdb'),
+        );
         let transaction = await attachment.startTransaction();
         await attachment.execute(transaction, `create table t1 (x_blob blob)`);
 
@@ -1147,7 +1164,7 @@ export function runCommonTests(client: Client) {
 
     describe('BlobStream', () => {
       test('#seek()', async () => {
-        const attachment = await client.createDatabase(getTempFile('BlobStream-seek.fdb'));
+        const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'BlobStream-seek.fdb'));
         const transaction = await attachment.startTransaction();
 
         await attachment.execute(transaction, 'create table t1 (b blob)');

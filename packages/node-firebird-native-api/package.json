@@ -63,6 +63,7 @@
     "node-gyp": "^12.2.0"
   },
   "devDependencies": {
+    "jest": "^30.2.0",
     "node-cloop-gen": "^1.0.1"
   }
 }

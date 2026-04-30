@@ -6681,8 +6681,20 @@ __metadata:
   resolution: "node-firebird-driver-native@workspace:packages/node-firebird-driver-native"
   dependencies:
     "@types/node": "npm:^22.13.10"
+    jest: "npm:^30.2.0"
     node-firebird-driver: "workspace:^"
     node-firebird-native-api: "workspace:^"
+  languageName: unknown
+  linkType: soft
+
+"node-firebird-driver-wire@workspace:packages/node-firebird-driver-wire":
+  version: 0.0.0-use.local
+  resolution: "node-firebird-driver-wire@workspace:packages/node-firebird-driver-wire"
+  dependencies:
+    "@types/node": "npm:^22.13.10"
+    dotenv: "npm:^17.2.3"
+    jest: "npm:^30.2.0"
+    node-firebird-driver: "workspace:^"
   languageName: unknown
   linkType: soft
 
@@ -6730,6 +6742,7 @@ __metadata:
   dependencies:
     "@types/node": "npm:^22.13.10"
     bindings: "npm:^1.5.0"
+    jest: "npm:^30.2.0"
     node-addon-api: "npm:^8.5.0"
     node-cloop-gen: "npm:^1.0.1"
     node-gyp: "npm:^12.2.0"
