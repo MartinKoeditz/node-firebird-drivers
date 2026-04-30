@@ -51,7 +51,12 @@ export function getDriverTestDatabasePath(testConfig: DriverTestConfig, name: st
     throw new Error('Test temporary directory is not configured.');
   }
 
-  return `${testConfig.tmpDir}/${name}`;
+  const extensionIndex = name.lastIndexOf('.');
+  const tick = process.hrtime.bigint();
+  const databaseName =
+    extensionIndex > 0 ? `${name.slice(0, extensionIndex)}-${tick}${name.slice(extensionIndex)}` : `${name}-${tick}`;
+
+  return `${testConfig.tmpDir}/${databaseName}`;
 }
 
 export function getDriverTestDatabaseUri(testConfig: DriverTestConfig, name: string): string {
