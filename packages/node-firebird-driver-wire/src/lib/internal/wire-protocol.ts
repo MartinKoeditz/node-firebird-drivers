@@ -6,90 +6,112 @@ import { commonInfo, dpb, epb, sqlTypes, statementInfo } from 'node-firebird-dri
 
 import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
-  arch_generic,
-  AUTH_PLUGINS,
-  AuthPluginName,
-  blr_begin,
-  blr_blob2,
-  blr_bool,
-  blr_double,
-  blr_end,
-  blr_eoc,
-  blr_ex_time_tz,
-  blr_ex_timestamp_tz,
-  blr_int64,
-  blr_long,
-  blr_message,
-  blr_null,
-  blr_short,
-  blr_sql_date,
-  blr_sql_time,
-  blr_text,
-  blr_timestamp,
-  blr_varying,
-  blr_version5,
-  CNCT_client_crypt,
-  CNCT_host,
-  CNCT_login,
-  CNCT_plugin_list,
-  CNCT_plugin_name,
-  CNCT_specific_data,
-  CNCT_user,
-  CNCT_user_verification,
-  CONNECT_VERSION3,
-  DSQL_close,
-  DSQL_drop,
-  op_accept,
-  op_accept_data,
-  op_allocate_statement,
-  op_attach,
-  op_cancel,
-  op_cancel_blob,
-  op_cancel_events,
-  op_close_blob,
-  op_commit,
-  op_commit_retaining,
-  op_cond_accept,
-  op_connect,
-  op_connect_request,
-  op_cont_auth,
-  op_create,
-  op_create_blob2,
-  op_detach,
-  op_disconnect,
-  op_drop_database,
-  op_dummy,
-  op_event,
-  op_execute,
-  op_execute2,
-  op_fetch,
-  op_fetch_response,
-  op_free_statement,
-  op_get_segment,
-  op_info_blob,
-  op_info_sql,
-  op_open_blob2,
-  op_ping,
-  op_prepare_statement,
-  op_put_segment,
-  op_que_events,
-  op_reject,
-  op_response,
-  op_rollback,
-  op_rollback_retaining,
-  op_seek_blob,
-  op_set_cursor,
-  op_sql_response,
-  op_transaction,
-  P_REQ_async,
-  ptype_batch_send,
-  STATEMENT_FLAG_HAS_CURSOR,
-  SUPPORTED_PROTOCOLS,
-  WIRE_CRYPT_ENABLED,
+  authPlugin,
+  blr,
+  connectParameter,
+  dsql,
+  protocolRequest,
+  statementFlag,
+  wireCrypt,
+  wireOp,
+  wirePacketType,
+  wireProtocol,
 } from './constants';
 import { SocketChannel } from './socket-channel';
 import { assertSuccessfulResponse, parseStatusVector } from './status';
 import { writeTraditionalClumplet, writeWideClumplet, writeWideStringClumplet, XdrWriter } from './xdr';
+
+const { list: AUTH_PLUGINS } = authPlugin;
+type AuthPluginName = authPlugin.Name;
+
+const {
+  begin: blr_begin,
+  blob2: blr_blob2,
+  bool: blr_bool,
+  double: blr_double,
+  end: blr_end,
+  eoc: blr_eoc,
+  exTimeTz: blr_ex_time_tz,
+  exTimestampTz: blr_ex_timestamp_tz,
+  int64: blr_int64,
+  long: blr_long,
+  message: blr_message,
+  null_: blr_null,
+  short: blr_short,
+  sqlDate: blr_sql_date,
+  sqlTime: blr_sql_time,
+  text: blr_text,
+  timestamp: blr_timestamp,
+  varying: blr_varying,
+  version5: blr_version5,
+} = blr;
+
+const {
+  clientCrypt: CNCT_client_crypt,
+  host: CNCT_host,
+  login: CNCT_login,
+  pluginList: CNCT_plugin_list,
+  pluginName: CNCT_plugin_name,
+  specificData: CNCT_specific_data,
+  user: CNCT_user,
+  userVerification: CNCT_user_verification,
+} = connectParameter;
+
+const { async: P_REQ_async } = protocolRequest;
+const { hasCursor: STATEMENT_FLAG_HAS_CURSOR } = statementFlag;
+const { enabled: WIRE_CRYPT_ENABLED } = wireCrypt;
+
+const {
+  accept: op_accept,
+  acceptData: op_accept_data,
+  allocateStatement: op_allocate_statement,
+  attach: op_attach,
+  cancel: op_cancel,
+  cancelBlob: op_cancel_blob,
+  cancelEvents: op_cancel_events,
+  closeBlob: op_close_blob,
+  commit: op_commit,
+  commitRetaining: op_commit_retaining,
+  condAccept: op_cond_accept,
+  connect: op_connect,
+  connectRequest: op_connect_request,
+  contAuth: op_cont_auth,
+  create: op_create,
+  createBlob2: op_create_blob2,
+  detach: op_detach,
+  disconnect: op_disconnect,
+  dropDatabase: op_drop_database,
+  dummy: op_dummy,
+  event: op_event,
+  execute: op_execute,
+  execute2: op_execute2,
+  fetch: op_fetch,
+  fetchResponse: op_fetch_response,
+  freeStatement: op_free_statement,
+  getSegment: op_get_segment,
+  infoBlob: op_info_blob,
+  infoSql: op_info_sql,
+  openBlob2: op_open_blob2,
+  ping: op_ping,
+  prepareStatement: op_prepare_statement,
+  putSegment: op_put_segment,
+  queEvents: op_que_events,
+  reject: op_reject,
+  response: op_response,
+  rollback: op_rollback,
+  rollbackRetaining: op_rollback_retaining,
+  seekBlob: op_seek_blob,
+  setCursor: op_set_cursor,
+  sqlResponse: op_sql_response,
+  transaction: op_transaction,
+} = wireOp;
+
+const { batchSend: ptype_batch_send } = wirePacketType;
+const {
+  archGeneric: arch_generic,
+  connectVersion3: CONNECT_VERSION3,
+  supportedProtocols: SUPPORTED_PROTOCOLS,
+} = wireProtocol;
 
 export interface WireProtocolOptions {
   readonly host: string;
@@ -783,13 +805,13 @@ export class WireProtocol {
 
   async closeCursor(statement: StatementHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishStatement(statement, DSQL_close, 'close cursor');
+      await this.finishStatement(statement, dsql.close, 'close cursor');
     });
   }
 
   async freeStatement(statement: StatementHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishStatement(statement, DSQL_drop, 'free statement');
+      await this.finishStatement(statement, dsql.drop, 'free statement');
     });
   }
 
@@ -952,7 +974,7 @@ export class WireProtocol {
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
 
-    if ((option & DSQL_drop) !== 0) {
+    if ((option & dsql.drop) !== 0) {
       this.statementMetadata.delete(statement.handle);
       this.exhaustedCursors.delete(statement.handle);
     }
@@ -1263,23 +1285,17 @@ export class WireProtocol {
     }
 
     const clumplets = this.readDpbClumplets(baseDpb).filter(
-      ({ tag }) =>
-        tag !== dpb.auth_plugin_name && tag !== dpb.auth_plugin_list && tag !== dpb.specific_auth_data,
+      ({ tag }) => tag !== dpb.auth_plugin_name && tag !== dpb.auth_plugin_list && tag !== dpb.specific_auth_data,
     );
 
-    const parts = [
-      Buffer.from([dpb.version2]),
-      ...clumplets.map(({ tag, value }) => writeWideClumplet(tag, value)),
-    ];
+    const parts = [Buffer.from([dpb.version2]), ...clumplets.map(({ tag, value }) => writeWideClumplet(tag, value))];
 
     if (!clumplets.some(({ tag }) => tag === dpb.utf8_filename)) {
       parts.push(writeWideClumplet(dpb.utf8_filename, Buffer.alloc(0)));
     }
 
     parts.push(writeWideStringClumplet(dpb.auth_plugin_name, this.currentPluginName));
-    parts.push(
-      writeWideStringClumplet(dpb.auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
-    );
+    parts.push(writeWideStringClumplet(dpb.auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)));
     parts.push(writeWideClumplet(dpb.specific_auth_data, attachAuthData));
     return Buffer.concat(parts);
   }
@@ -1606,7 +1622,7 @@ export class WireProtocol {
     const inputColumns: MutableStatementColumn[] = [];
     const outputColumns: MutableStatementColumn[] = [];
     let statementType = 0;
-    let statementFlags = 0;
+    let statementFlag = 0;
     let outputSection = false;
     let offset = 0;
 
@@ -1622,7 +1638,7 @@ export class WireProtocol {
           break;
 
         case statementInfo.sqlStmtFlags:
-          ({ value: statementFlags, nextOffset: offset } = this.readInfoNumeric(data, offset));
+          ({ value: statementFlag, nextOffset: offset } = this.readInfoNumeric(data, offset));
           break;
 
         case statementInfo.sqlSelect:
@@ -1784,7 +1800,7 @@ export class WireProtocol {
     const outputFormat = this.buildMessageFormat(normalizedOutputColumns);
     return {
       type: statementType,
-      flags: statementFlags,
+      flags: statementFlag,
       inputColumns: normalizedInputColumns,
       outputColumns: normalizedOutputColumns,
       inputBlr: inputFormat.blr,

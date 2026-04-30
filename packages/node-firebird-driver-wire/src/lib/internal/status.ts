@@ -1,12 +1,14 @@
-import {
-  isc_arg_cstring,
-  isc_arg_end,
-  isc_arg_gds,
-  isc_arg_interpreted,
-  isc_arg_number,
-  isc_arg_string,
-  isc_arg_warning,
-} from './constants';
+import { statusArgument } from './constants';
+
+const {
+  cstring: isc_arg_cstring,
+  end: isc_arg_end,
+  gds: isc_arg_gds,
+  interpreted: isc_arg_interpreted,
+  number: isc_arg_number,
+  string: isc_arg_string,
+  warning: isc_arg_warning,
+} = statusArgument;
 
 export interface ParsedStatusVector {
   readonly isError: boolean;

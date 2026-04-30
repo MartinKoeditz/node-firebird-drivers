@@ -1,9 +1,9 @@
+import { createBpb, dpb, tpb } from '../../../node-firebird-driver/src/lib/impl/fb-util';
 import {
   ensureDriverTestTmpDir,
   getDriverTestDatabasePath,
   loadDriverTestConfig,
 } from '../../../node-firebird-driver/src/test/test-config';
-import { createBpb, dpb, tpb } from '../../../node-firebird-driver/src/lib/impl/fb-util';
 import { legacyHash } from '../lib/internal/auth/legacy-hash';
 import { WireProtocol } from '../lib/internal/wire-protocol';
 import { writeTraditionalClumplet } from '../lib/internal/xdr';
@@ -267,7 +267,8 @@ describe('node-firebird-driver-wire', () => {
         try {
           await wireProtocol.prepareStatement(
             transaction,
-            statement, `
+            statement,
+            `
               execute block as
               begin
                 post_event 'EVENT1';

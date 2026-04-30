@@ -1,8 +1,10 @@
 import { Buffer } from 'node:buffer';
 
-import { AuthPluginName } from '../constants';
+import { authPlugin } from '../constants';
 import { legacyHash } from './legacy-hash';
 import { SrpClientSession } from './srp';
+
+type AuthPluginName = authPlugin.Name;
 
 export interface ClientAuthPlugin {
   readonly name: AuthPluginName;
