@@ -64,6 +64,8 @@ jobs:
           set FB_ZIP=Firebird-4.0.6.3221-0-x64.zip
           powershell Invoke-WebRequest "https://github.com/FirebirdSQL/firebird/releases/download/v4.0.6/$env:FB_ZIP" -OutFile "$env:FB_ZIP"
           7z x -oC:\Firebird %FB_ZIP%
+          cd /d C:\Firebird
+          call install_service.bat
 
       - name: Build
         shell: bash
@@ -74,7 +76,7 @@ jobs:
       - name: Test (Linux)
         if: startsWith(matrix.os, 'ubuntu-')
         run: |
-          sg firebird -c "LD_LIBRARY_PATH=/usr/lib64 corepack yarn test"
+          sg firebird -c "env ISC_USER=${ISC_USER} ISC_PASSWORD=${ISC_PASSWORD} LD_LIBRARY_PATH=/usr/lib64 corepack yarn test"
 
       - name: Test (MacOS)
         if: startsWith(matrix.os, 'macos-')
@@ -89,6 +91,8 @@ jobs:
         shell: cmd
         run: |
           set PATH=C:\Firebird;%PATH%
+          if not exist C:\Windows\Temp\node-fb mkdir C:\Windows\Temp\node-fb
+          set NODE_FB_TEST_TMP_DIR=C:/Windows/Temp/node-fb
           corepack yarn test
 
       - name: Upload native-api-${{ matrix.os }}-${{ matrix.node-version }}
