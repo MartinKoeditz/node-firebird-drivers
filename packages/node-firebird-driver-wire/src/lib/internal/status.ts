@@ -25,6 +25,30 @@ export class FirebirdWireError extends Error {
   }
 }
 
+function formatKnownStatus(status: ParsedStatusVector): string | undefined {
+  if (status.gdsCodes.length === 1 && status.gdsCodes[0] === 335544794) {
+    return 'operation was cancelled';
+  }
+
+  if (
+    status.gdsCodes.length >= 4 &&
+    status.gdsCodes[0] === 335544569 &&
+    status.gdsCodes[1] === 335544436 &&
+    status.gdsCodes[2] === 335544634 &&
+    status.gdsCodes[3] === 335544382 &&
+    status.messages.length >= 4
+  ) {
+    return (
+      `Dynamic SQL Error\n` +
+      `-SQL error code = ${status.messages[0]}\n` +
+      `-Token unknown - line ${status.messages[1]}, column ${status.messages[2]}\n` +
+      `-${status.messages[3]}`
+    );
+  }
+
+  return undefined;
+}
+
 export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
   const gdsCodes: number[] = [];
   const warnings: number[] = [];
@@ -91,6 +115,11 @@ export function parseStatusVector(buffer: Buffer): ParsedStatusVector {
 export function assertSuccessfulResponse(status: ParsedStatusVector, fallbackMessage: string): void {
   if (!status.isError) {
     return;
+  }
+
+  const knownStatus = formatKnownStatus(status);
+  if (knownStatus) {
+    throw new FirebirdWireError(knownStatus, status);
   }
 
   const detailParts: string[] = [];

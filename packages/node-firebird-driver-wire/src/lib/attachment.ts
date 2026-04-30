@@ -13,7 +13,7 @@ import {
   PrepareOptions,
   TransactionOptions,
 } from 'node-firebird-driver';
-import { AbstractAttachment } from 'node-firebird-driver/dist/lib/impl';
+import { AbstractAttachment, cancelType } from 'node-firebird-driver/dist/lib/impl';
 
 import { AttachmentHandle, WireProtocol } from './internal/wire-protocol';
 
@@ -106,12 +106,12 @@ export class AttachmentImpl extends AbstractAttachment {
     }
   }
 
-  protected async internalEnableCancellation(_enable: boolean): Promise<void> {
-    throw new Error('Unimplemented method: enableCancellation.');
+  protected async internalEnableCancellation(enable: boolean): Promise<void> {
+    await this.protocol!.cancelOperation(enable ? cancelType.enable : cancelType.disable);
   }
 
-  protected async internalCancelOperation(_forcibleAbort: boolean): Promise<void> {
-    throw new Error('Unimplemented method: cancelOperation.');
+  protected async internalCancelOperation(forcibleAbort: boolean): Promise<void> {
+    await this.protocol!.cancelOperation(forcibleAbort ? cancelType.abort : cancelType.raise);
   }
 
   protected async internalStartTransaction(options?: TransactionOptions): Promise<TransactionImpl> {

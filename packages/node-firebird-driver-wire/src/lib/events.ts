@@ -1,19 +1,35 @@
 import { AttachmentImpl } from './attachment';
+import { EventHandle } from './internal/wire-protocol';
 
 import { AbstractEvents } from 'node-firebird-driver/dist/lib/impl';
 
 export class EventsImpl extends AbstractEvents {
   override attachment: AttachmentImpl;
+  private eventHandle?: EventHandle;
+
+  private constructor(attachment: AttachmentImpl) {
+    super(attachment);
+  }
 
   static async queue(
-    _attachment: AttachmentImpl,
-    _names: string[],
-    _callBack: (counters: [string, number][]) => Promise<void>,
+    attachment: AttachmentImpl,
+    names: string[],
+    callBack: (counters: [string, number][]) => Promise<void>,
   ): Promise<EventsImpl> {
-    throw new Error('Unimplemented method: queueEvents.');
+    const events = new EventsImpl(attachment);
+    events.eventHandle = await attachment.protocol!.queueEvents(names, callBack);
+    return events;
   }
 
   protected async internalCancel(): Promise<void> {
-    return await Promise.resolve();
+    if (!this.eventHandle) {
+      return;
+    }
+
+    try {
+      await this.attachment.protocol!.cancelEvents(this.eventHandle);
+    } finally {
+      this.eventHandle = undefined;
+    }
   }
 }

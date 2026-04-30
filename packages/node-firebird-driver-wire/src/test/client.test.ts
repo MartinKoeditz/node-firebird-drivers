@@ -1,6 +1,6 @@
 import { createWireClient } from '../lib';
 
-import { runCommonTests } from 'node-firebird-driver/dist/test/tests';
+import { runCommonTests } from '../../../node-firebird-driver/src/test/tests';
 
 const client = createWireClient();
 

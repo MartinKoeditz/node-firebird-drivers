@@ -67,6 +67,7 @@ import {
   op_allocate_statement,
   op_attach,
   op_cancel_blob,
+  op_cancel,
   op_commit,
   op_commit_retaining,
   op_cond_accept,
@@ -396,22 +397,7 @@ export class WireProtocol {
     this.eventSubscriptions.set(eventHandle.id, subscription);
 
     try {
-      const writer = new XdrWriter();
-      writer.writeInt32(op_que_events);
-      writer.writeInt32(this.attachmentHandle);
-      writer.writeBuffer(subscription.eventBuffer);
-      writer.writeInt32(0);
-      writer.writeInt32(0);
-      writer.writeInt32(subscription.id);
-      await this.channel.write(writer.toBuffer());
-
-      const operation = await this.readOperation();
-      if (operation !== op_response) {
-        throw new Error(`Unexpected operation ${operation} while queueing events.`);
-      }
-
-      const response = await this.readResponse();
-      assertSuccessfulResponse(response.status, 'Firebird queue events failed');
+      await this.sendQueueEvents(subscription);
       return eventHandle;
     } catch (error) {
       this.eventSubscriptions.delete(subscription.id);
@@ -433,7 +419,7 @@ export class WireProtocol {
 
     const writer = new XdrWriter();
     writer.writeInt32(op_cancel_events);
-    writer.writeInt32(this.attachmentHandle);
+    writer.writeInt32(0);
     writer.writeInt32(event.id);
     await this.channel.write(writer.toBuffer());
 
@@ -444,6 +430,22 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird cancel events failed');
+  }
+
+  async cancelOperation(kind: number): Promise<void> {
+    if (!this.channel) {
+      throw new Error('Wire protocol socket is not open.');
+    }
+
+    if (kind === 4) {
+      await this.close();
+      return;
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_cancel);
+    writer.writeInt32(kind);
+    await this.channel.write(writer.toBuffer());
   }
 
   async startTransaction(tpb: Buffer): Promise<TransactionHandle> {
@@ -560,7 +562,7 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird seek blob failed');
-    return response.quad.readInt32BE(4);
+    return response.handle !== 0 ? response.handle : response.quad.readInt32BE(4);
   }
 
   async closeBlob(blob: BlobHandle): Promise<void> {
@@ -733,6 +735,12 @@ export class WireProtocol {
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
+    if (operation === op_response) {
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird fetch cursor row failed');
+      return undefined;
+    }
+
     if (operation !== op_fetch_response) {
       throw new Error(`Unexpected operation ${operation} while fetching a cursor row.`);
     }
@@ -783,10 +791,19 @@ export class WireProtocol {
     }
 
     if (this.socket) {
-      await new Promise<void>((resolve) => {
-        this.socket!.once('close', () => resolve());
-        this.socket!.end();
-      }).catch(() => undefined);
+      const socket = this.socket;
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          socket.once('close', () => resolve());
+          socket.end();
+        }),
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            socket.destroy();
+            resolve();
+          }, this.options.timeoutMs ?? 5000),
+        ),
+      ]).catch(() => undefined);
     }
 
     this.channel = undefined;
@@ -828,7 +845,7 @@ export class WireProtocol {
     const writer = new XdrWriter();
     writer.writeInt32(op_connect_request);
     writer.writeInt32(P_REQ_async);
-    writer.writeInt32(this.attachmentHandle);
+    writer.writeInt32(0);
     writer.writeInt32(0);
     await this.channel.write(writer.toBuffer());
 
@@ -1411,7 +1428,7 @@ export class WireProtocol {
 
   private async dispatchEvent(event: EventMessage): Promise<void> {
     const subscription = this.eventSubscriptions.get(event.requestId);
-    if (!subscription || event.database !== this.attachmentHandle) {
+    if (!subscription) {
       return;
     }
 
@@ -1430,6 +1447,25 @@ export class WireProtocol {
 
   private async readOperation(): Promise<number> {
     return await this.readOperationFrom(this.channel!);
+  }
+
+  private async sendQueueEvents(subscription: EventSubscription): Promise<void> {
+    const writer = new XdrWriter();
+    writer.writeInt32(op_que_events);
+    writer.writeInt32(0);
+    writer.writeBuffer(subscription.eventBuffer);
+    writer.writeInt32(0);
+    writer.writeInt32(0);
+    writer.writeInt32(subscription.id);
+    await this.channel!.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while queueing events.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird queue events failed');
   }
 
   private async readOperationFrom(channel: SocketChannel): Promise<number> {
@@ -1460,12 +1496,7 @@ export class WireProtocol {
   }
 
   private async readResponse(): Promise<ResponseMessage> {
-    const handle = (await this.channel!.readExactly(4)).readInt32BE(0);
-    const quad = await this.channel!.readExactly(8);
-    const objectId = quad.readBigInt64BE(0);
-    const data = await this.readXdrBuffer();
-    const status = parseStatusVector(await this.readStatusVectorBuffer());
-    return { handle, objectId, quad, data, status };
+    return await this.readResponseFrom(this.channel!);
   }
 
   private async readEventMessage(channel: SocketChannel): Promise<EventMessage> {
@@ -1495,22 +1526,35 @@ export class WireProtocol {
   }
 
   private async readStatusVectorBuffer(): Promise<Buffer> {
+    return await this.readStatusVectorBufferFrom(this.channel!);
+  }
+
+  private async readResponseFrom(channel: SocketChannel): Promise<ResponseMessage> {
+    const handle = (await channel.readExactly(4)).readInt32BE(0);
+    const quad = await channel.readExactly(8);
+    const objectId = quad.readBigInt64BE(0);
+    const data = await this.readXdrBufferFrom(channel);
+    const status = parseStatusVector(await this.readStatusVectorBufferFrom(channel));
+    return { handle, objectId, quad, data, status };
+  }
+
+  private async readStatusVectorBufferFrom(channel: SocketChannel): Promise<Buffer> {
     const chunks: Buffer[] = [];
     while (true) {
-      const tagChunk = await this.channel!.readExactly(4);
+      const tagChunk = await channel.readExactly(4);
       const tag = tagChunk.readInt32BE(0);
       chunks.push(tagChunk);
       if (tag === 0) {
         break;
       }
 
-      const valueChunk = await this.channel!.readExactly(4);
+      const valueChunk = await channel.readExactly(4);
       chunks.push(valueChunk);
       if (tag === 2 || tag === 3 || tag === 5) {
         const length = valueChunk.readInt32BE(0);
         if (length > 0) {
           const paddedLength = length + ((4 - (length % 4)) & 3);
-          const valueBuffer = await this.channel!.readExactly(paddedLength);
+          const valueBuffer = await channel.readExactly(paddedLength);
           chunks.push(valueBuffer.subarray(0, length));
         }
       }
@@ -1910,8 +1954,8 @@ export class WireProtocol {
 
         case SQL_TIME_TZ_EX:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 4, await this.readXdrInt16(), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 6, await this.readXdrInt16(), LITTLE_ENDIAN);
+          view.setUint16(column.offset + 4, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 6, this.decodeTimeZoneOffset(await this.readXdrInt32()), LITTLE_ENDIAN);
           break;
 
         case SQL_DOUBLE: {
@@ -1928,8 +1972,8 @@ export class WireProtocol {
         case SQL_TIMESTAMP_TZ_EX:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 8, await this.readXdrInt16(), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 10, await this.readXdrInt16(), LITTLE_ENDIAN);
+          view.setUint16(column.offset + 8, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 10, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
         case SQL_BOOLEAN: {
@@ -1969,10 +2013,6 @@ export class WireProtocol {
     return (await this.channel!.readExactly(4)).readInt32BE(0);
   }
 
-  private async readXdrInt16(): Promise<number> {
-    return (await this.channel!.readExactly(4)).readInt16BE(0);
-  }
-
   private async readFetchBatchMarker(statementHandle: number): Promise<void> {
     const operation = await this.readOperation();
     if (operation !== op_fetch_response) {
@@ -1997,6 +2037,15 @@ export class WireProtocol {
 
   private align(value: number, alignment: number): number {
     return alignment > 1 ? (value + alignment - 1) & ~(alignment - 1) : value;
+  }
+
+  private decodeTimeZoneValue(encodedValue: number): number {
+    return encodedValue & 0xffff;
+  }
+
+  private decodeTimeZoneOffset(encodedValue: number): number {
+    const value = this.decodeTimeZoneValue(encodedValue);
+    return value - 1440;
   }
 
   private buildPackedMessage(
@@ -2052,8 +2101,8 @@ export class WireProtocol {
 
         case SQL_TIME_TZ_EX:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt16(column.offset + 4, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt16(column.offset + 6, LITTLE_ENDIAN));
+          writer.writeInt32(view.getUint16(column.offset + 4, LITTLE_ENDIAN));
+          writer.writeInt32(this.encodeTimeZoneOffset(view.getInt16(column.offset + 6, LITTLE_ENDIAN)));
           break;
 
         case SQL_TIMESTAMP:
@@ -2064,7 +2113,7 @@ export class WireProtocol {
         case SQL_TIMESTAMP_TZ_EX:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
           writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt16(column.offset + 8, LITTLE_ENDIAN));
+          writer.writeInt32(view.getUint16(column.offset + 8, LITTLE_ENDIAN));
           writer.writeInt32(view.getInt16(column.offset + 10, LITTLE_ENDIAN));
           break;
 
@@ -2086,5 +2135,9 @@ export class WireProtocol {
     }
 
     return writer.toBuffer();
+  }
+
+  private encodeTimeZoneOffset(offsetMinutes: number): number {
+    return offsetMinutes + 1440;
   }
 }

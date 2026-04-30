@@ -33,6 +33,7 @@ function decodePackedBlobSegments(buffer: Buffer): Buffer[] {
 export class BlobStreamImpl extends AbstractBlobStream {
   override attachment: AttachmentImpl;
   blobHandle?: BlobHandle;
+  private position = 0;
   private readBuffer = Buffer.alloc(0);
   private eofPending = false;
   private eofReached = false;
@@ -80,7 +81,13 @@ export class BlobStreamImpl extends AbstractBlobStream {
     this.readBuffer = Buffer.alloc(0);
     this.eofPending = false;
     this.eofReached = false;
-    return await this.attachment.protocol!.seekBlob(this.blobHandle!, whence ?? BlobSeekWhence.START, offset);
+
+    const mode = whence ?? BlobSeekWhence.START;
+    const seekMode = mode === BlobSeekWhence.CURRENT ? BlobSeekWhence.START : mode;
+    const seekOffset = mode === BlobSeekWhence.CURRENT ? this.position + offset : offset;
+    const position = await this.attachment.protocol!.seekBlob(this.blobHandle!, seekMode, seekOffset);
+    this.position = position;
+    return position;
   }
 
   protected async internalRead(buffer: Buffer): Promise<number> {
@@ -117,6 +124,7 @@ export class BlobStreamImpl extends AbstractBlobStream {
     const readBytes = Math.min(buffer.length, this.readBuffer.length);
     this.readBuffer.copy(buffer, 0, 0, readBytes);
     this.readBuffer = this.readBuffer.subarray(readBytes);
+    this.position += readBytes;
 
     if (this.readBuffer.length === 0 && this.eofPending) {
       this.eofReached = true;
