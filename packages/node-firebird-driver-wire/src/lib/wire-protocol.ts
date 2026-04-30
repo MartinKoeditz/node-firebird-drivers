@@ -1,13 +1,19 @@
 import { Buffer } from 'node:buffer';
 import { connect as connectSocket, Socket } from 'node:net';
-import { endianness, hostname, userInfo } from 'node:os';
+import { hostname, userInfo } from 'node:os';
 
-import { commonInfo, dpb, epb, sqlTypes, statementInfo } from 'node-firebird-driver/dist/lib/impl';
+import { commonInfo, statementInfo } from 'node-firebird-driver/dist/lib/impl';
 
 import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
+  buildAttachmentDpb,
+  buildConnectPluginList,
+  buildRemainingPluginList,
+  normalizeLogin,
+  writeMultiPartConnectParameter,
+} from './auth-helpers';
+import {
   authPlugin,
-  blr,
   connectParameter,
   dsql,
   protocolRequest,
@@ -17,228 +23,44 @@ import {
   wirePacketType,
   wireProtocol,
 } from './constants';
+import { buildEventBlock, calculateEventCounts, getEventHost, parseAuxiliaryPort } from './event-helpers';
+import { buildPackedMessage, readPackedMessageBuffer } from './packed-message';
+import {
+  AcceptMessage,
+  AttachmentHandle,
+  BlobHandle,
+  BlobSegmentResponse,
+  CursorHandle,
+  EventCallback,
+  EventHandle,
+  EventMessage,
+  EventSubscription,
+  ResponseMessage,
+  StatementHandle,
+  StatementMetadata,
+  TransactionHandle,
+  WireProtocolOptions,
+} from './protocol-types';
 import { SocketChannel } from './socket-channel';
 import { assertSuccessfulResponse, parseStatusVector } from './status';
+import { parseStatementMetadata } from './statement-metadata';
 import { createWireCryptSession } from './wire-crypt';
-import { writeTraditionalClumplet, writeWideClumplet, writeWideStringClumplet, XdrWriter } from './xdr';
+import { writeTraditionalClumplet, XdrWriter } from './xdr';
 
-const { list: AUTH_PLUGINS } = authPlugin;
+export type {
+  AttachmentHandle,
+  BlobHandle,
+  BlobSegmentResponse,
+  CursorHandle,
+  EventHandle,
+  StatementColumn,
+  StatementHandle,
+  TransactionHandle,
+  WireProtocolOptions,
+} from './protocol-types';
+
 type AuthPluginName = authPlugin.Name;
 
-// FIXME:
-const {
-  begin: blr_begin,
-  blob2: blr_blob2,
-  bool: blr_bool,
-  double: blr_double,
-  end: blr_end,
-  eoc: blr_eoc,
-  exTimeTz: blr_ex_time_tz,
-  exTimestampTz: blr_ex_timestamp_tz,
-  int64: blr_int64,
-  long: blr_long,
-  message: blr_message,
-  null_: blr_null,
-  short: blr_short,
-  sqlDate: blr_sql_date,
-  sqlTime: blr_sql_time,
-  text: blr_text,
-  timestamp: blr_timestamp,
-  varying: blr_varying,
-  version5: blr_version5,
-} = blr;
-
-// FIXME:
-const {
-  clientCrypt: CNCT_client_crypt,
-  host: CNCT_host,
-  login: CNCT_login,
-  pluginList: CNCT_plugin_list,
-  pluginName: CNCT_plugin_name,
-  specificData: CNCT_specific_data,
-  user: CNCT_user,
-  userVerification: CNCT_user_verification,
-} = connectParameter;
-
-// FIXME:
-const { async: P_REQ_async } = protocolRequest;
-const { hasCursor: STATEMENT_FLAG_HAS_CURSOR } = statementFlag;
-const { enabled: WIRE_CRYPT_ENABLED } = wireCrypt;
-
-// FIXME:
-const {
-  accept: op_accept,
-  acceptData: op_accept_data,
-  allocateStatement: op_allocate_statement,
-  attach: op_attach,
-  cancel: op_cancel,
-  cancelBlob: op_cancel_blob,
-  cancelEvents: op_cancel_events,
-  closeBlob: op_close_blob,
-  commit: op_commit,
-  commitRetaining: op_commit_retaining,
-  condAccept: op_cond_accept,
-  connect: op_connect,
-  connectRequest: op_connect_request,
-  crypt: op_crypt,
-  contAuth: op_cont_auth,
-  create: op_create,
-  createBlob2: op_create_blob2,
-  detach: op_detach,
-  disconnect: op_disconnect,
-  dropDatabase: op_drop_database,
-  dummy: op_dummy,
-  event: op_event,
-  execute: op_execute,
-  execute2: op_execute2,
-  fetch: op_fetch,
-  fetchResponse: op_fetch_response,
-  freeStatement: op_free_statement,
-  getSegment: op_get_segment,
-  infoBlob: op_info_blob,
-  infoSql: op_info_sql,
-  openBlob2: op_open_blob2,
-  ping: op_ping,
-  prepareStatement: op_prepare_statement,
-  putSegment: op_put_segment,
-  queEvents: op_que_events,
-  reject: op_reject,
-  response: op_response,
-  rollback: op_rollback,
-  rollbackRetaining: op_rollback_retaining,
-  seekBlob: op_seek_blob,
-  setCursor: op_set_cursor,
-  sqlResponse: op_sql_response,
-  transaction: op_transaction,
-} = wireOp;
-
-// FIXME:
-const { batchSend: ptype_batch_send } = wirePacketType;
-const {
-  archGeneric: arch_generic,
-  connectVersion3: CONNECT_VERSION3,
-  supportedProtocols: SUPPORTED_PROTOCOLS,
-} = wireProtocol;
-
-export interface WireProtocolOptions {
-  readonly host: string;
-  readonly port?: number;
-  readonly username: string;
-  readonly password: string;
-  readonly timeoutMs?: number;
-}
-
-export interface AttachmentHandle {
-  readonly handle: number;
-}
-
-export interface TransactionHandle {
-  readonly handle: number;
-}
-
-export interface StatementHandle {
-  readonly handle: number;
-}
-
-export interface BlobHandle {
-  readonly handle: number;
-  readonly id: Buffer;
-}
-
-export interface BlobSegmentResponse {
-  readonly state: number;
-  readonly data: Buffer;
-}
-
-export interface StatementColumn {
-  readonly alias: string;
-  readonly field: string;
-  readonly relation: string;
-  readonly type: number;
-  readonly originalType: number;
-  readonly subType: number;
-  readonly charSet: number;
-  readonly scale: number;
-  readonly length: number;
-  readonly nullable: boolean;
-  readonly offset: number;
-  readonly nullOffset: number;
-}
-
-export interface CursorHandle {
-  readonly statement: StatementHandle;
-  readonly columns: readonly StatementColumn[];
-  readonly fetchBlr: Buffer;
-  readonly fetchMessageLength: number;
-}
-
-export interface EventHandle {
-  readonly id: number;
-  readonly names: readonly string[];
-}
-
-type EventCallback = (counters: [string, number][]) => Promise<void> | void;
-
-interface AcceptMessage {
-  readonly authenticated: boolean;
-  readonly pluginName: string;
-  readonly data: Buffer;
-  readonly keys: Buffer;
-}
-
-interface ResponseMessage {
-  readonly handle: number;
-  readonly objectId: bigint;
-  readonly quad: Buffer;
-  readonly data: Buffer;
-  readonly status: ReturnType<typeof parseStatusVector>;
-}
-
-interface DpbClumplet {
-  readonly tag: number;
-  readonly value: Buffer;
-}
-
-interface StatementMetadata {
-  readonly type: number;
-  readonly flags: number;
-  readonly inputColumns: readonly StatementColumn[];
-  readonly outputColumns: readonly StatementColumn[];
-  readonly inputBlr: Buffer;
-  readonly inputMessageLength: number;
-  readonly outputBlr: Buffer;
-  readonly outputMessageLength: number;
-}
-
-interface MutableStatementColumn {
-  alias: string;
-  field: string;
-  relation: string;
-  type: number;
-  originalType: number;
-  subType: number;
-  charSet: number;
-  scale: number;
-  length: number;
-  nullable: boolean;
-  offset: number;
-  nullOffset: number;
-}
-
-interface EventMessage {
-  readonly database: number;
-  readonly items: Buffer;
-  readonly requestId: number;
-}
-
-interface EventSubscription {
-  readonly id: number;
-  readonly names: readonly string[];
-  readonly callback: EventCallback;
-  eventBuffer: Buffer;
-}
-
-const LITTLE_ENDIAN = endianness() === 'LE';
 const FETCH_NO_DATA = 100;
 
 const STATEMENT_BASE_INFO_ITEMS = Buffer.from([statementInfo.sqlStmtType, statementInfo.sqlStmtFlags]);
@@ -297,7 +119,7 @@ export class WireProtocol {
 
       await this.openSocket();
       const attachAuthData = await this.performConnectHandshake(database);
-      return await this.executeAttachmentOperation(op_attach, database, dpb, attachAuthData, 'attach');
+      return await this.executeAttachmentOperation(wireOp.attach, database, dpb, attachAuthData, 'attach');
     });
   }
 
@@ -309,7 +131,7 @@ export class WireProtocol {
 
       await this.openSocket();
       const attachAuthData = await this.performConnectHandshake(database);
-      return await this.executeAttachmentOperation(op_create, database, dpb, attachAuthData, 'create');
+      return await this.executeAttachmentOperation(wireOp.create, database, dpb, attachAuthData, 'create');
     });
   }
 
@@ -320,12 +142,12 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_detach);
+      writer.writeInt32(wireOp.detach);
       writer.writeInt32(0);
       await this.channel!.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while detaching.`);
       }
 
@@ -342,12 +164,12 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_drop_database);
+      writer.writeInt32(wireOp.dropDatabase);
       writer.writeInt32(0);
       await this.channel!.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while dropping the database.`);
       }
 
@@ -364,11 +186,11 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_ping);
+      writer.writeInt32(wireOp.ping);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while pinging.`);
       }
 
@@ -393,7 +215,7 @@ export class WireProtocol {
       const subscription: EventSubscription = {
         ...eventHandle,
         callback,
-        eventBuffer: this.buildEventBlock(names),
+        eventBuffer: buildEventBlock(names),
       };
       this.eventSubscriptions.set(eventHandle.id, subscription);
 
@@ -421,13 +243,13 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_cancel_events);
+      writer.writeInt32(wireOp.cancelEvents);
       writer.writeInt32(0);
       writer.writeInt32(event.id);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while cancelling events.`);
       }
 
@@ -448,7 +270,7 @@ export class WireProtocol {
     }
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_cancel);
+    writer.writeInt32(wireOp.cancel);
     writer.writeInt32(kind);
     await this.channel.write(writer.toBuffer());
   }
@@ -460,13 +282,13 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_transaction);
+      writer.writeInt32(wireOp.transaction);
       writer.writeInt32(0);
       writer.writeBuffer(tpb);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while starting a transaction.`);
       }
 
@@ -478,31 +300,31 @@ export class WireProtocol {
 
   async commit(transaction: TransactionHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishTransaction(op_commit, transaction, 'commit');
+      await this.finishTransaction(wireOp.commit, transaction, 'commit');
     });
   }
 
   async rollback(transaction: TransactionHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishTransaction(op_rollback, transaction, 'rollback');
+      await this.finishTransaction(wireOp.rollback, transaction, 'rollback');
     });
   }
 
   async commitRetaining(transaction: TransactionHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishTransaction(op_commit_retaining, transaction, 'commit retaining');
+      await this.finishTransaction(wireOp.commitRetaining, transaction, 'commit retaining');
     });
   }
 
   async rollbackRetaining(transaction: TransactionHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishTransaction(op_rollback_retaining, transaction, 'rollback retaining');
+      await this.finishTransaction(wireOp.rollbackRetaining, transaction, 'rollback retaining');
     });
   }
 
   async createBlob(transaction: TransactionHandle, bpb: Uint8Array = Buffer.alloc(0)): Promise<BlobHandle> {
     return await this.runMainChannelTask(async () => {
-      return await this.openOrCreateBlob(op_create_blob2, transaction, Buffer.alloc(8), bpb, 'create blob');
+      return await this.openOrCreateBlob(wireOp.createBlob2, transaction, Buffer.alloc(8), bpb, 'create blob');
     });
   }
 
@@ -512,7 +334,7 @@ export class WireProtocol {
     bpb: Uint8Array = Buffer.alloc(0),
   ): Promise<BlobHandle> {
     return await this.runMainChannelTask(async () => {
-      return await this.openOrCreateBlob(op_open_blob2, transaction, blobId, bpb, 'open blob');
+      return await this.openOrCreateBlob(wireOp.openBlob2, transaction, blobId, bpb, 'open blob');
     });
   }
 
@@ -523,14 +345,14 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_get_segment);
+      writer.writeInt32(wireOp.getSegment);
       writer.writeInt32(blob.handle);
       writer.writeInt32(bufferLength);
       writer.writeBuffer(Buffer.alloc(0));
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while getting a blob segment.`);
       }
 
@@ -550,14 +372,14 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_put_segment);
+      writer.writeInt32(wireOp.putSegment);
       writer.writeInt32(blob.handle);
       writer.writeInt32(segment.length);
       writer.writeBuffer(segment);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while putting a blob segment.`);
       }
 
@@ -573,14 +395,14 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_seek_blob);
+      writer.writeInt32(wireOp.seekBlob);
       writer.writeInt32(blob.handle);
       writer.writeInt32(mode);
       writer.writeInt32(offset);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while seeking a blob.`);
       }
 
@@ -592,13 +414,13 @@ export class WireProtocol {
 
   async closeBlob(blob: BlobHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishBlob(op_close_blob, blob, 'close blob');
+      await this.finishBlob(wireOp.closeBlob, blob, 'close blob');
     });
   }
 
   async cancelBlob(blob: BlobHandle): Promise<void> {
     await this.runMainChannelTask(async () => {
-      await this.finishBlob(op_cancel_blob, blob, 'cancel blob');
+      await this.finishBlob(wireOp.cancelBlob, blob, 'cancel blob');
     });
   }
 
@@ -609,12 +431,12 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_allocate_statement);
+      writer.writeInt32(wireOp.allocateStatement);
       writer.writeInt32(this.attachmentHandle);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while allocating a statement.`);
       }
 
@@ -636,7 +458,7 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_prepare_statement);
+      writer.writeInt32(wireOp.prepareStatement);
       writer.writeInt32(transaction.handle);
       writer.writeInt32(statement.handle);
       writer.writeInt32(sqlDialect);
@@ -646,7 +468,7 @@ export class WireProtocol {
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while preparing a statement.`);
       }
 
@@ -655,20 +477,20 @@ export class WireProtocol {
 
       // FIXME: Why two calls?
       const selectInfo = await this.getInfo(
-        op_info_sql,
+        wireOp.infoSql,
         statement.handle,
         STATEMENT_SELECT_INFO_ITEMS,
         'statement output metadata',
       );
       const bindInfo = await this.getInfo(
-        op_info_sql,
+        wireOp.infoSql,
         statement.handle,
         STATEMENT_BIND_INFO_ITEMS,
         'statement input metadata',
       );
 
       const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
-      this.statementMetadata.set(statement.handle, this.parseStatementMetadata(metadataInfo));
+      this.statementMetadata.set(statement.handle, parseStatementMetadata(metadataInfo));
     });
   }
 
@@ -699,14 +521,14 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_set_cursor);
+      writer.writeInt32(wireOp.setCursor);
       writer.writeInt32(statement.handle);
       writer.writeString(cursorName);
       writer.writeInt32(0);
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation !== op_response) {
+      if (operation !== wireOp.response) {
         throw new Error(`Unexpected operation ${operation} while setting a cursor name.`);
       }
 
@@ -717,13 +539,13 @@ export class WireProtocol {
 
   async getSqlInfo(statement: StatementHandle, items: Buffer): Promise<Buffer> {
     return await this.runMainChannelTask(async () => {
-      return await this.getInfo(op_info_sql, statement.handle, items, 'sql info');
+      return await this.getInfo(wireOp.infoSql, statement.handle, items, 'sql info');
     });
   }
 
   async getBlobInfo(blob: BlobHandle, items: Buffer): Promise<Buffer> {
     return await this.runMainChannelTask(async () => {
-      return await this.getInfo(op_info_blob, blob.handle, items, 'blob info');
+      return await this.getInfo(wireOp.infoBlob, blob.handle, items, 'blob info');
     });
   }
 
@@ -744,7 +566,7 @@ export class WireProtocol {
     return await this.runMainChannelTask(async () => {
       const metadata = this.getStatementMetadata(statement);
 
-      if ((metadata.flags & STATEMENT_FLAG_HAS_CURSOR) === 0) {
+      if ((metadata.flags & statementFlag.hasCursor) === 0) {
         throw new Error('Statement does not produce a cursor.');
       }
 
@@ -776,7 +598,7 @@ export class WireProtocol {
       }
 
       const writer = new XdrWriter();
-      writer.writeInt32(op_fetch);
+      writer.writeInt32(wireOp.fetch);
       writer.writeInt32(cursor.statement.handle);
       writer.writeBuffer(cursor.fetchBlr);
       writer.writeInt32(0);
@@ -784,13 +606,13 @@ export class WireProtocol {
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
-      if (operation === op_response) {
+      if (operation === wireOp.response) {
         const response = await this.readResponse();
         assertSuccessfulResponse(response.status, 'Firebird fetch cursor row failed');
         return undefined;
       }
 
-      if (operation !== op_fetch_response) {
+      if (operation !== wireOp.fetchResponse) {
         throw new Error(`Unexpected operation ${operation} while fetching a cursor row.`);
       }
 
@@ -814,7 +636,11 @@ export class WireProtocol {
         throw new Error(`Unsupported cursor fetch batch size ${messages}.`);
       }
 
-      const rowBuffer = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
+      const rowBuffer = await readPackedMessageBuffer(
+        this.channel,
+        metadata.outputColumns,
+        metadata.outputMessageLength,
+      );
       await this.readFetchBatchMarker(cursor.statement.handle);
       return rowBuffer;
     });
@@ -842,7 +668,7 @@ export class WireProtocol {
 
     if (this.channel) {
       const writer = new XdrWriter();
-      writer.writeInt32(op_disconnect);
+      writer.writeInt32(wireOp.disconnect);
       await this.channel.write(writer.toBuffer()).catch(() => undefined);
     }
 
@@ -931,22 +757,22 @@ export class WireProtocol {
     }
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_connect_request);
-    writer.writeInt32(P_REQ_async);
+    writer.writeInt32(wireOp.connectRequest);
+    writer.writeInt32(protocolRequest.async);
     writer.writeInt32(0);
     writer.writeInt32(0);
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while opening the event channel.`);
     }
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird open event channel failed');
 
-    const eventPort = this.parseAuxiliaryPort(response.data);
-    const eventHost = this.getEventHost();
+    const eventPort = parseAuxiliaryPort(response.data);
+    const eventHost = getEventHost(this.socket.remoteAddress, this.options.host);
     const eventSocket = connectSocket({
       host: eventHost,
       port: eventPort,
@@ -980,7 +806,7 @@ export class WireProtocol {
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing transaction ${actionName}.`);
     }
 
@@ -994,13 +820,13 @@ export class WireProtocol {
     }
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_free_statement);
+    writer.writeInt32(wireOp.freeStatement);
     writer.writeInt32(statement.handle);
     writer.writeInt32(option);
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
     }
 
@@ -1036,7 +862,7 @@ export class WireProtocol {
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
     }
 
@@ -1059,7 +885,7 @@ export class WireProtocol {
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
     }
 
@@ -1079,7 +905,7 @@ export class WireProtocol {
 
     const metadata = this.getStatementMetadata(statement);
     const writer = new XdrWriter();
-    writer.writeInt32(withOutput ? op_execute2 : op_execute);
+    writer.writeInt32(withOutput ? wireOp.execute2 : wireOp.execute);
     writer.writeInt32(statement.handle);
     writer.writeInt32(transaction.handle);
     writer.writeBuffer(metadata.inputBlr);
@@ -1087,7 +913,7 @@ export class WireProtocol {
     writer.writeInt32(metadata.inputColumns.length > 0 ? 1 : 0);
 
     if (metadata.inputColumns.length > 0) {
-      writer.writeBytes(this.buildPackedMessage(metadata.inputColumns, metadata.inputMessageLength, inputMessage));
+      writer.writeBytes(buildPackedMessage(metadata.inputColumns, metadata.inputMessageLength, inputMessage));
     }
 
     if (withOutput) {
@@ -1103,17 +929,21 @@ export class WireProtocol {
     let outputMessage: Buffer | undefined;
     let operation = await this.readOperation();
 
-    if (withOutput && operation === op_sql_response) {
+    if (withOutput && operation === wireOp.sqlResponse) {
       const messages = (await this.channel.readExactly(4)).readInt32BE(0);
 
       if (messages > 0) {
-        outputMessage = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
+        outputMessage = await readPackedMessageBuffer(
+          this.channel,
+          metadata.outputColumns,
+          metadata.outputMessageLength,
+        );
       }
 
       operation = await this.readOperation();
     }
 
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing a statement.`);
     }
 
@@ -1137,7 +967,7 @@ export class WireProtocol {
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
     }
 
@@ -1149,32 +979,32 @@ export class WireProtocol {
   private async writeConnect(database: string): Promise<void> {
     const systemUserName = this.getSystemUserName();
     const identification = Buffer.concat([
-      writeTraditionalClumplet(CNCT_login, Buffer.from(this.options.username, 'utf8')),
-      writeTraditionalClumplet(CNCT_plugin_name, Buffer.from(this.currentPluginName, 'utf8')),
-      writeTraditionalClumplet(CNCT_plugin_list, Buffer.from(this.buildConnectPluginList(), 'utf8')),
-      this.writeMultiPartConnectParameter(CNCT_specific_data, this.currentPlugin!.initialData),
-      writeTraditionalClumplet(CNCT_client_crypt, Buffer.from([WIRE_CRYPT_ENABLED])),
-      writeTraditionalClumplet(CNCT_user, Buffer.from(systemUserName, 'utf8')),
-      writeTraditionalClumplet(CNCT_host, Buffer.from(hostname(), 'utf8')),
-      writeTraditionalClumplet(CNCT_user_verification, Buffer.alloc(0)),
+      writeTraditionalClumplet(connectParameter.login, Buffer.from(this.options.username, 'utf8')),
+      writeTraditionalClumplet(connectParameter.pluginName, Buffer.from(this.currentPluginName, 'utf8')),
+      writeTraditionalClumplet(connectParameter.pluginList, Buffer.from(buildConnectPluginList(), 'utf8')),
+      writeMultiPartConnectParameter(connectParameter.specificData, this.currentPlugin!.initialData),
+      writeTraditionalClumplet(connectParameter.clientCrypt, Buffer.from([wireCrypt.enabled])),
+      writeTraditionalClumplet(connectParameter.user, Buffer.from(systemUserName, 'utf8')),
+      writeTraditionalClumplet(connectParameter.host, Buffer.from(hostname(), 'utf8')),
+      writeTraditionalClumplet(connectParameter.userVerification, Buffer.alloc(0)),
     ]);
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_connect);
+    writer.writeInt32(wireOp.connect);
     writer.writeInt32(0);
-    writer.writeInt32(CONNECT_VERSION3);
-    writer.writeInt32(arch_generic);
+    writer.writeInt32(wireProtocol.connectVersion3);
+    writer.writeInt32(wireProtocol.archGeneric);
     writer.writeString(database);
-    writer.writeInt32(SUPPORTED_PROTOCOLS.length);
+    writer.writeInt32(wireProtocol.supportedProtocols.length);
     writer.writeBuffer(identification);
 
-    let weight = SUPPORTED_PROTOCOLS.length;
+    let weight = wireProtocol.supportedProtocols.length;
 
-    for (const protocolVersion of SUPPORTED_PROTOCOLS) {
+    for (const protocolVersion of wireProtocol.supportedProtocols) {
       writer.writeInt32(protocolVersion);
-      writer.writeInt32(arch_generic);
+      writer.writeInt32(wireProtocol.archGeneric);
       writer.writeInt32(0);
-      writer.writeInt32(ptype_batch_send);
+      writer.writeInt32(wirePacketType.batchSend);
       // FIXME: ptype_lazy_send
       writer.writeInt32(weight--);
     }
@@ -1192,7 +1022,7 @@ export class WireProtocol {
   }
 
   private async performConnectHandshake(database: string): Promise<Buffer | undefined> {
-    this.currentPluginName = AUTH_PLUGINS[0];
+    this.currentPluginName = authPlugin.list[0];
     this.currentPlugin = createAuthPlugin(this.currentPluginName, this.options.password);
     this.clientAuthListSent = false;
     this.pendingServerKeys.length = 0;
@@ -1202,16 +1032,16 @@ export class WireProtocol {
     while (true) {
       const operation = await this.readOperation();
 
-      if (operation === op_accept) {
+      if (operation === wireOp.accept) {
         return this.currentPlugin.initialData;
       }
 
-      if (operation === op_accept_data || operation === op_cond_accept) {
+      if (operation === wireOp.acceptData || operation === wireOp.condAccept) {
         const accept = await this.readAcceptMessage();
         this.recordServerKeys(accept.keys);
         const attachAuthData = accept.authenticated ? undefined : this.processAcceptPlugin(accept);
 
-        if (operation === op_cond_accept && !accept.authenticated) {
+        if (operation === wireOp.condAccept && !accept.authenticated) {
           await this.writeContinueAuthentication(attachAuthData ?? Buffer.alloc(0));
           continue;
         }
@@ -1223,7 +1053,7 @@ export class WireProtocol {
         return attachAuthData;
       }
 
-      if (operation === op_cont_auth) {
+      if (operation === wireOp.contAuth) {
         const authData = await this.readContinueAuthenticationMessage();
         this.recordServerKeys(authData.keys);
         const response = this.processAcceptPlugin(authData);
@@ -1231,7 +1061,7 @@ export class WireProtocol {
         continue;
       }
 
-      if (operation === op_response) {
+      if (operation === wireOp.response) {
         const response = await this.readResponse();
         assertSuccessfulResponse(response.status, 'Firebird connect failed');
         this.recordServerKeys(response.data);
@@ -1239,7 +1069,7 @@ export class WireProtocol {
         return undefined;
       }
 
-      if (operation === op_reject) {
+      if (operation === wireOp.reject) {
         throw new Error('Firebird server rejected all proposed wire protocols.');
       }
 
@@ -1254,12 +1084,12 @@ export class WireProtocol {
     attachAuthData: Buffer | undefined,
     actionName: string,
   ): Promise<AttachmentHandle> {
-    const dpb = this.buildAttachmentDpb(baseDpb, attachAuthData);
+    const dpb = buildAttachmentDpb(baseDpb, attachAuthData, this.currentPluginName);
     await this.writeAttachmentOperation(operation, database, dpb);
 
     while (true) {
       const responseOperation = await this.readOperation();
-      if (responseOperation === op_cont_auth) {
+      if (responseOperation === wireOp.contAuth) {
         const authData = await this.readContinueAuthenticationMessage();
         this.recordServerKeys(authData.keys);
         const response = this.processAcceptPlugin(authData);
@@ -1267,7 +1097,7 @@ export class WireProtocol {
         continue;
       }
 
-      if (responseOperation === op_response) {
+      if (responseOperation === wireOp.response) {
         const response = await this.readResponse();
         assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
         this.recordServerKeys(response.data);
@@ -1282,7 +1112,7 @@ export class WireProtocol {
 
   private processAcceptPlugin(message: AcceptMessage): Buffer {
     if (message.pluginName && message.pluginName !== this.currentPluginName) {
-      if (!AUTH_PLUGINS.includes(message.pluginName as AuthPluginName)) {
+      if (!authPlugin.list.includes(message.pluginName as AuthPluginName)) {
         throw new Error(`Firebird requested unsupported authentication plugin ${message.pluginName}.`);
       }
 
@@ -1300,7 +1130,7 @@ export class WireProtocol {
     }
 
     return this.currentPlugin.continueAuthentication(
-      this.normalizeLogin(this.options.username),
+      normalizeLogin(this.options.username),
       this.options.password,
       message.data,
     );
@@ -1308,10 +1138,10 @@ export class WireProtocol {
 
   private async writeContinueAuthentication(data: Buffer): Promise<void> {
     const writer = new XdrWriter();
-    writer.writeInt32(op_cont_auth);
+    writer.writeInt32(wireOp.contAuth);
     writer.writeBuffer(data);
     writer.writeString(this.currentPluginName);
-    writer.writeString(this.clientAuthListSent ? '' : this.buildRemainingPluginList(this.currentPluginName));
+    writer.writeString(this.clientAuthListSent ? '' : buildRemainingPluginList(this.currentPluginName));
     writer.writeBuffer(Buffer.alloc(0));
     await this.channel!.write(writer.toBuffer());
     this.clientAuthListSent = true;
@@ -1339,7 +1169,7 @@ export class WireProtocol {
     }
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_crypt);
+    writer.writeInt32(wireOp.crypt);
     writer.writeString(session.pluginName);
     writer.writeString(session.keyType);
     await this.channel.write(writer.toBuffer());
@@ -1350,7 +1180,7 @@ export class WireProtocol {
     });
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while enabling wire encryption.`);
     }
 
@@ -1358,11 +1188,6 @@ export class WireProtocol {
     assertSuccessfulResponse(response.status, 'Firebird wire encryption setup failed');
     this.pendingServerKeys.length = 0;
     this.wireCryptEnabled = true;
-  }
-
-  private buildRemainingPluginList(currentPluginName: AuthPluginName): string {
-    const index = AUTH_PLUGINS.indexOf(currentPluginName);
-    return index === -1 ? currentPluginName : AUTH_PLUGINS.slice(index).join(',');
   }
 
   private concatInfoBuffers(buffers: readonly Buffer[]): Buffer {
@@ -1375,185 +1200,18 @@ export class WireProtocol {
     );
   }
 
-  private buildAttachmentDpb(baseDpb: Buffer, attachAuthData: Buffer | undefined): Buffer {
-    if (!attachAuthData) {
-      return baseDpb;
-    }
-
-    const clumplets = this.readDpbClumplets(baseDpb).filter(
-      ({ tag }) => tag !== dpb.auth_plugin_name && tag !== dpb.auth_plugin_list && tag !== dpb.specific_auth_data,
-    );
-
-    const parts = [Buffer.from([dpb.version2]), ...clumplets.map(({ tag, value }) => writeWideClumplet(tag, value))];
-
-    if (!clumplets.some(({ tag }) => tag === dpb.utf8_filename)) {
-      parts.push(writeWideClumplet(dpb.utf8_filename, Buffer.alloc(0)));
-    }
-
-    parts.push(writeWideStringClumplet(dpb.auth_plugin_name, this.currentPluginName));
-    parts.push(writeWideStringClumplet(dpb.auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)));
-    parts.push(writeWideClumplet(dpb.specific_auth_data, attachAuthData));
-
-    return Buffer.concat(parts);
-  }
-
-  private normalizeLogin(login: string): string {
-    if (login.length > 2 && login.startsWith('"') && login.endsWith('"')) {
-      let normalized = login.slice(1, -1);
-      for (let i = 0; i < normalized.length; i++) {
-        if (normalized[i] !== '"') {
-          continue;
-        }
-
-        if (i + 1 < normalized.length && normalized[i + 1] === '"') {
-          normalized = normalized.slice(0, i) + normalized.slice(i + 1);
-          i++;
-          continue;
-        }
-
-        normalized = normalized.slice(0, i);
-        break;
-      }
-      return normalized;
-    }
-
-    return login.toUpperCase();
-  }
-
-  private buildConnectPluginList(): string {
-    return AUTH_PLUGINS.join(',');
-  }
-
-  private readDpbClumplets(buffer: Buffer): DpbClumplet[] {
-    if (buffer.length === 0) {
-      throw new Error('DPB must not be empty.');
-    }
-
-    const version = buffer[0];
-    if (version !== dpb.version1 && version !== dpb.version2) {
-      throw new Error(`Unsupported DPB version ${version}.`);
-    }
-
-    const clumplets: DpbClumplet[] = [];
-    let offset = 1;
-
-    while (offset < buffer.length) {
-      const tag = buffer[offset++];
-      let valueLength: number;
-
-      if (version === dpb.version1) {
-        if (offset >= buffer.length) {
-          throw new Error('Invalid DPB: missing traditional clumplet length.');
-        }
-        valueLength = buffer[offset++];
-      } else {
-        if (offset + 4 > buffer.length) {
-          throw new Error('Invalid DPB: missing wide clumplet length.');
-        }
-        valueLength = buffer.readUInt32LE(offset);
-        offset += 4;
-      }
-
-      if (offset + valueLength > buffer.length) {
-        throw new Error(`Invalid DPB: clumplet ${tag} overruns the buffer.`);
-      }
-
-      clumplets.push({
-        tag,
-        value: buffer.subarray(offset, offset + valueLength),
-      });
-      offset += valueLength;
-    }
-
-    return clumplets;
-  }
-
-  private writeMultiPartConnectParameter(parameterType: number, value: Buffer): Buffer {
-    const parts: Buffer[] = [];
-    let position = 0;
-    let step = 0;
-
-    while (position < value.length) {
-      const toWrite = Math.min(value.length - position, 254);
-      parts.push(Buffer.from([parameterType, toWrite + 1, step++]));
-      parts.push(value.subarray(position, position + toWrite));
-      position += toWrite;
-    }
-
-    return Buffer.concat(parts);
-  }
-
-  private buildEventBlock(names: readonly string[]): Buffer {
-    const parts = [Buffer.from([epb.version1])];
-
-    for (const name of names) {
-      const encodedName = Buffer.from(name, 'utf8');
-      if (encodedName.length > 255) {
-        throw new Error(`Invalid event name '${name}'.`);
-      }
-
-      parts.push(Buffer.from([encodedName.length]));
-      parts.push(encodedName);
-      parts.push(Buffer.alloc(4));
-    }
-
-    return Buffer.concat(parts);
-  }
-
-  private calculateEventCounts(previous: Buffer, current: Buffer, names: readonly string[]): [string, number][] {
-    const counters: [string, number][] = [];
-    let previousOffset = 1;
-    let currentOffset = 1;
-
-    for (const name of names) {
-      const previousNameLength = previous[previousOffset++] ?? 0;
-      previousOffset += previousNameLength;
-
-      const currentNameLength = current[currentOffset++] ?? 0;
-      currentOffset += currentNameLength;
-
-      const previousCount = previous.readUInt32LE(previousOffset);
-      previousOffset += 4;
-
-      const currentCount = current.readUInt32LE(currentOffset);
-      currentOffset += 4;
-
-      counters.push([name, currentCount - previousCount]);
-    }
-
-    return counters;
-  }
-
-  private parseAuxiliaryPort(address: Buffer): number {
-    if (address.length < 4) {
-      throw new Error('Firebird returned an invalid auxiliary event address.');
-    }
-
-    return address.readUInt16BE(2);
-  }
-
-  private getEventHost(): string {
-    if (this.socket?.remoteAddress) {
-      return this.socket.remoteAddress.startsWith('::ffff:')
-        ? this.socket.remoteAddress.slice('::ffff:'.length)
-        : this.socket.remoteAddress;
-    }
-
-    return this.options.host;
-  }
-
   private async runEventLoop(): Promise<void> {
     try {
       while (this.eventChannel) {
         const operation = await this.readOperationFrom(this.eventChannel);
 
-        if (operation === op_event) {
+        if (operation === wireOp.event) {
           const event = await this.readEventMessage(this.eventChannel);
           await this.dispatchEvent(event);
           continue;
         }
 
-        if (operation === op_disconnect) {
+        if (operation === wireOp.disconnect) {
           break;
         }
 
@@ -1581,7 +1239,7 @@ export class WireProtocol {
       return;
     }
 
-    const counters = this.calculateEventCounts(subscription.eventBuffer, event.items, subscription.names);
+    const counters = calculateEventCounts(subscription.eventBuffer, event.items, subscription.names);
     subscription.eventBuffer = Buffer.from(event.items);
 
     if (this.eventSubscriptions.get(subscription.id) === subscription) {
@@ -1611,7 +1269,7 @@ export class WireProtocol {
 
   private async sendQueueEvents(subscription: EventSubscription): Promise<void> {
     const writer = new XdrWriter();
-    writer.writeInt32(op_que_events);
+    writer.writeInt32(wireOp.queEvents);
     writer.writeInt32(0);
     writer.writeBuffer(subscription.eventBuffer);
     writer.writeInt32(0);
@@ -1620,7 +1278,7 @@ export class WireProtocol {
     await this.channel!.write(writer.toBuffer());
 
     const operation = await this.readOperation();
-    if (operation !== op_response) {
+    if (operation !== wireOp.response) {
       throw new Error(`Unexpected operation ${operation} while queueing events.`);
     }
 
@@ -1632,7 +1290,7 @@ export class WireProtocol {
     while (true) {
       const operationBuffer = await channel.readExactly(4);
       const operation = operationBuffer.readInt32BE(0);
-      if (operation !== op_dummy) {
+      if (operation !== wireOp.dummy) {
         return operation;
       }
     }
@@ -1718,464 +1376,9 @@ export class WireProtocol {
     return Buffer.concat(chunks);
   }
 
-  private parseStatementMetadata(data: Buffer): StatementMetadata {
-    const inputColumns: MutableStatementColumn[] = [];
-    const outputColumns: MutableStatementColumn[] = [];
-    let statementType = 0;
-    let statementFlag = 0;
-    let outputSection = false;
-    let offset = 0;
-
-    while (offset < data.length) {
-      const item = data[offset++];
-      if (item === commonInfo.end) {
-        break;
-      }
-
-      switch (item) {
-        case statementInfo.sqlStmtType:
-          ({ value: statementType, nextOffset: offset } = this.readInfoNumeric(data, offset));
-          break;
-
-        case statementInfo.sqlStmtFlags:
-          ({ value: statementFlag, nextOffset: offset } = this.readInfoNumeric(data, offset));
-          break;
-
-        case statementInfo.sqlSelect:
-          outputSection = true;
-          break;
-
-        case statementInfo.sqlBind:
-          outputSection = false;
-          break;
-
-        case statementInfo.sqlDescribeVars: {
-          const describeInfo = this.readInfoNumeric(data, offset);
-          offset = describeInfo.nextOffset;
-
-          if (describeInfo.value === 0) {
-            break;
-          }
-
-          let currentColumn: MutableStatementColumn | undefined;
-          let remainingVariables = describeInfo.value;
-          while (offset < data.length) {
-            const describeItem = data[offset++];
-            if (describeItem === statementInfo.sqlDescribeEnd) {
-              currentColumn = undefined;
-              if (--remainingVariables <= 0) {
-                break;
-              }
-              continue;
-            }
-
-            if (
-              describeItem === commonInfo.end ||
-              describeItem === commonInfo.truncated ||
-              describeItem === statementInfo.sqlSelect ||
-              describeItem === statementInfo.sqlBind
-            ) {
-              offset--;
-              break;
-            }
-
-            switch (describeItem) {
-              case statementInfo.sqlSqldaSeq: {
-                const sequenceInfo = this.readInfoNumeric(data, offset);
-                const sequence = sequenceInfo.value;
-                offset = sequenceInfo.nextOffset;
-                const targetColumns = outputSection ? outputColumns : inputColumns;
-
-                while (targetColumns.length < sequence) {
-                  targetColumns.push({
-                    alias: '',
-                    field: '',
-                    relation: '',
-                    type: 0,
-                    originalType: 0,
-                    subType: 0,
-                    charSet: 0,
-                    scale: 0,
-                    length: 0,
-                    nullable: false,
-                    offset: 0,
-                    nullOffset: 0,
-                  });
-                }
-
-                currentColumn = targetColumns[sequence - 1];
-                break;
-              }
-
-              case statementInfo.sqlType: {
-                const typeInfo = this.readInfoNumeric(data, offset);
-                const type = typeInfo.value;
-                offset = typeInfo.nextOffset;
-                if (currentColumn) {
-                  currentColumn.originalType = type & ~1;
-                  currentColumn.type = type & ~1;
-                  currentColumn.nullable = (type & 1) !== 0;
-                }
-                break;
-              }
-
-              case statementInfo.sqlSubType:
-                if (currentColumn) {
-                  const info = this.readInfoNumeric(data, offset);
-                  currentColumn.subType = info.value;
-                  currentColumn.charSet = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
-                }
-                break;
-
-              case statementInfo.sqlScale:
-                if (currentColumn) {
-                  const info = this.readInfoNumeric(data, offset);
-                  currentColumn.scale = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
-                }
-                break;
-
-              case statementInfo.sqlLength:
-                if (currentColumn) {
-                  const info = this.readInfoNumeric(data, offset);
-                  currentColumn.length = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
-                }
-                break;
-
-              case statementInfo.sqlField:
-                if (currentColumn) {
-                  const info = this.readInfoString(data, offset);
-                  currentColumn.field = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoString(data, offset));
-                }
-                break;
-
-              case statementInfo.sqlRelation:
-                if (currentColumn) {
-                  const info = this.readInfoString(data, offset);
-                  currentColumn.relation = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoString(data, offset));
-                }
-                break;
-
-              case statementInfo.sqlAlias:
-                if (currentColumn) {
-                  const info = this.readInfoString(data, offset);
-                  currentColumn.alias = info.value;
-                  offset = info.nextOffset;
-                } else {
-                  ({ nextOffset: offset } = this.readInfoString(data, offset));
-                }
-                break;
-
-              default:
-                ({ nextOffset: offset } = this.readInfoString(data, offset));
-                break;
-            }
-          }
-          break;
-        }
-
-        default:
-          ({ nextOffset: offset } = this.readInfoString(data, offset));
-          break;
-      }
-    }
-
-    const normalizedInputColumns = this.normalizeColumns(inputColumns);
-    const normalizedOutputColumns = this.normalizeColumns(outputColumns);
-    const inputFormat = this.buildMessageFormat(normalizedInputColumns);
-    const outputFormat = this.buildMessageFormat(normalizedOutputColumns);
-
-    return {
-      type: statementType,
-      flags: statementFlag,
-      inputColumns: normalizedInputColumns,
-      outputColumns: normalizedOutputColumns,
-      inputBlr: inputFormat.blr,
-      inputMessageLength: inputFormat.messageLength,
-      outputBlr: outputFormat.blr,
-      outputMessageLength: outputFormat.messageLength,
-    };
-  }
-
-  private readInfoNumeric(data: Buffer, offset: number): { value: number; nextOffset: number } {
-    if (offset + 2 > data.length) {
-      return { value: 0, nextOffset: data.length };
-    }
-
-    const length = data.readUInt16LE(offset);
-    const valueOffset = offset + 2;
-
-    return {
-      value: this.readLittleEndianInteger(data, valueOffset, length),
-      nextOffset: Math.min(valueOffset + length, data.length),
-    };
-  }
-
-  private readInfoString(data: Buffer, offset: number): { value: string; nextOffset: number } {
-    if (offset + 2 > data.length) {
-      return { value: '', nextOffset: data.length };
-    }
-
-    const length = data.readUInt16LE(offset);
-    const valueOffset = offset + 2;
-    const endOffset = Math.min(valueOffset + length, data.length);
-
-    return {
-      value: data.subarray(valueOffset, endOffset).toString('utf8'),
-      nextOffset: endOffset,
-    };
-  }
-
-  private readLittleEndianInteger(buffer: Buffer, offset: number, length: number): number {
-    let value = 0;
-    for (let i = 0; i < length; i++) {
-      value += buffer[offset + i] << (8 * i);
-    }
-
-    if (length > 0 && (buffer[offset + length - 1] & 0x80) !== 0) {
-      value -= 2 ** (length * 8);
-    }
-
-    return value;
-  }
-
-  // FIXME: This should not be here
-  private normalizeColumns(columns: readonly MutableStatementColumn[]): StatementColumn[] {
-    return columns.map((column) => {
-      const normalized = { ...column };
-
-      switch (normalized.type) {
-        case sqlTypes.SQL_TEXT:
-          normalized.type = sqlTypes.SQL_VARYING;
-          break;
-
-        case sqlTypes.SQL_SHORT:
-        case sqlTypes.SQL_LONG:
-        case sqlTypes.SQL_INT64:
-        case sqlTypes.SQL_FLOAT:
-          normalized.type = sqlTypes.SQL_DOUBLE;
-          normalized.subType = 0;
-          normalized.scale = 0;
-          normalized.length = 8;
-          break;
-
-        case sqlTypes.SQL_TIME_TZ:
-          normalized.type = sqlTypes.SQL_TIME_TZ_EX;
-          normalized.subType = 0;
-          normalized.length = 8;
-          break;
-
-        case sqlTypes.SQL_TIMESTAMP_TZ:
-          normalized.type = sqlTypes.SQL_TIMESTAMP_TZ_EX;
-          normalized.subType = 0;
-          normalized.length = 12;
-          break;
-
-        case sqlTypes.SQL_INT128:
-        case sqlTypes.SQL_DEC16:
-        case sqlTypes.SQL_DEC34:
-          normalized.type = sqlTypes.SQL_VARYING;
-          normalized.subType = 2;
-          normalized.charSet = 2;
-          normalized.scale = 0;
-          normalized.length = 45;
-          break;
-      }
-
-      if (normalized.type !== sqlTypes.SQL_TEXT && normalized.type !== sqlTypes.SQL_VARYING) {
-        normalized.charSet = 0;
-      }
-
-      return normalized;
-    });
-  }
-
-  private buildMessageFormat(columns: MutableStatementColumn[]): { blr: Buffer; messageLength: number } {
-    let messageLength = 0;
-    const fieldCount = columns.length * 2;
-    const parts = [blr_version5, blr_begin, blr_message, 0, fieldCount & 0xff, (fieldCount >> 8) & 0xff];
-
-    for (const column of columns) {
-      const { blr, alignment, length } = this.describeColumnType(column);
-      if (alignment > 1) {
-        messageLength = this.align(messageLength, alignment);
-      }
-
-      const offset = messageLength;
-      messageLength += length;
-      const nullOffset = this.align(messageLength, 2);
-      messageLength = nullOffset + 2;
-
-      column.offset = offset;
-      column.nullOffset = nullOffset;
-
-      parts.push(...blr, blr_short, 0);
-    }
-
-    parts.push(blr_end, blr_eoc);
-    return { blr: Buffer.from(parts), messageLength };
-  }
-
-  private describeColumnType(column: StatementColumn): { blr: number[]; alignment: number; length: number } {
-    switch (column.type) {
-      case sqlTypes.SQL_TEXT:
-        return {
-          blr: [blr_text, column.length & 0xff, (column.length >> 8) & 0xff],
-          alignment: 1,
-          length: column.length,
-        };
-      case sqlTypes.SQL_VARYING:
-        return {
-          blr: [blr_varying, column.length & 0xff, (column.length >> 8) & 0xff],
-          alignment: 2,
-          length: column.length + 2,
-        };
-      case sqlTypes.SQL_SHORT:
-        return { blr: [blr_short, column.scale & 0xff], alignment: 2, length: 2 };
-      case sqlTypes.SQL_LONG:
-        return { blr: [blr_long, column.scale & 0xff], alignment: 4, length: 4 };
-      case sqlTypes.SQL_INT64:
-        return { blr: [blr_int64, column.scale & 0xff], alignment: 8, length: 8 };
-      case sqlTypes.SQL_DOUBLE:
-        return { blr: [blr_double], alignment: 8, length: 8 };
-      case sqlTypes.SQL_TIMESTAMP:
-        return { blr: [blr_timestamp], alignment: 4, length: 8 };
-      case sqlTypes.SQL_TYPE_DATE:
-        return { blr: [blr_sql_date], alignment: 4, length: 4 };
-      case sqlTypes.SQL_TYPE_TIME:
-        return { blr: [blr_sql_time], alignment: 4, length: 4 };
-      case sqlTypes.SQL_TIME_TZ_EX:
-        return { blr: [blr_ex_time_tz], alignment: 4, length: 8 };
-      case sqlTypes.SQL_BOOLEAN:
-        return { blr: [blr_bool], alignment: 1, length: 1 };
-      case sqlTypes.SQL_BLOB:
-        return {
-          blr: [blr_blob2, column.subType & 0xff, (column.subType >> 8) & 0xff, 0, 0],
-          alignment: 4,
-          length: 8,
-        };
-      case sqlTypes.SQL_TIMESTAMP_TZ_EX:
-        return { blr: [blr_ex_timestamp_tz], alignment: 4, length: 12 };
-      case sqlTypes.SQL_NULL:
-        return { blr: [blr_null], alignment: 1, length: 0 };
-      default:
-        throw new Error(`Unsupported Firebird column type ${column.type} for cursor fetch.`);
-    }
-  }
-
-  private async readPackedMessageBuffer(columns: readonly StatementColumn[], messageLength: number): Promise<Buffer> {
-    const rowBuffer = Buffer.alloc(messageLength);
-    const view = new DataView(rowBuffer.buffer, rowBuffer.byteOffset, rowBuffer.byteLength);
-    const flagBytes = Math.ceil(columns.length / 8);
-    const nullBitmap = await this.readPaddedOpaque(flagBytes);
-
-    for (let index = 0; index < columns.length; index++) {
-      const column = columns[index];
-      const isNull = (nullBitmap[index >> 3] & (1 << (index & 7))) !== 0;
-      view.setInt16(column.nullOffset, isNull ? -1 : 0, LITTLE_ENDIAN);
-      if (isNull) {
-        continue;
-      }
-
-      switch (column.type) {
-        case sqlTypes.SQL_TEXT: {
-          const value = await this.readPaddedOpaque(column.length);
-          value.copy(rowBuffer, column.offset);
-          break;
-        }
-
-        case sqlTypes.SQL_VARYING: {
-          const valueLength = await this.readXdrInt32();
-          const value = await this.readPaddedOpaque(valueLength);
-          view.setUint16(column.offset, valueLength, LITTLE_ENDIAN);
-          value.copy(rowBuffer, column.offset + 2);
-          break;
-        }
-
-        case sqlTypes.SQL_TYPE_DATE:
-        case sqlTypes.SQL_TYPE_TIME:
-          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          break;
-
-        case sqlTypes.SQL_TIME_TZ_EX:
-          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setUint16(column.offset + 4, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 6, this.decodeTimeZoneOffset(await this.readXdrInt32()), LITTLE_ENDIAN);
-          break;
-
-        case sqlTypes.SQL_DOUBLE: {
-          const value = await this.channel!.readExactly(8);
-          view.setFloat64(column.offset, value.readDoubleBE(0), LITTLE_ENDIAN);
-          break;
-        }
-
-        case sqlTypes.SQL_TIMESTAMP:
-          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
-          break;
-
-        case sqlTypes.SQL_TIMESTAMP_TZ_EX:
-          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setUint16(column.offset + 8, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
-          view.setInt16(column.offset + 10, await this.readXdrInt32(), LITTLE_ENDIAN);
-          break;
-
-        case sqlTypes.SQL_BOOLEAN: {
-          const value = await this.readPaddedOpaque(1);
-          rowBuffer[column.offset] = value[0] ?? 0;
-          break;
-        }
-
-        case sqlTypes.SQL_BLOB: {
-          const value = await this.channel!.readExactly(8);
-          value.copy(rowBuffer, column.offset);
-          break;
-        }
-
-        case sqlTypes.SQL_NULL:
-          break;
-
-        default:
-          throw new Error(`Unsupported Firebird column type ${column.type} while reading a cursor row.`);
-      }
-    }
-
-    return rowBuffer;
-  }
-
-  private async readPaddedOpaque(length: number): Promise<Buffer> {
-    if (length === 0) {
-      return Buffer.alloc(0);
-    }
-
-    const paddedLength = length + ((4 - (length % 4)) & 3);
-    const value = await this.channel!.readExactly(paddedLength);
-
-    return value.subarray(0, length);
-  }
-
-  private async readXdrInt32(): Promise<number> {
-    return (await this.channel!.readExactly(4)).readInt32BE(0);
-  }
-
   private async readFetchBatchMarker(statementHandle: number): Promise<void> {
     const operation = await this.readOperation();
-    if (operation !== op_fetch_response) {
+    if (operation !== wireOp.fetchResponse) {
       throw new Error(`Unexpected operation ${operation} while completing a cursor fetch batch.`);
     }
 
@@ -2193,111 +1396,5 @@ export class WireProtocol {
     if (status !== 0) {
       throw new Error(`Firebird cursor fetch batch failed with status ${status}.`);
     }
-  }
-
-  private align(value: number, alignment: number): number {
-    return alignment > 1 ? (value + alignment - 1) & ~(alignment - 1) : value;
-  }
-
-  private decodeTimeZoneValue(encodedValue: number): number {
-    return encodedValue & 0xffff;
-  }
-
-  private decodeTimeZoneOffset(encodedValue: number): number {
-    const value = this.decodeTimeZoneValue(encodedValue);
-    return value - 1440;
-  }
-
-  private buildPackedMessage(
-    columns: readonly StatementColumn[],
-    messageLength: number,
-    message: Buffer | undefined,
-  ): Buffer {
-    const source = message ?? Buffer.alloc(messageLength);
-    if (source.length !== messageLength) {
-      throw new Error(`Incorrect statement input message length ${source.length}, expected ${messageLength}.`);
-    }
-
-    const view = new DataView(source.buffer, source.byteOffset, source.byteLength);
-    const flagBytes = Math.ceil(columns.length / 8);
-    const nullBitmap = Buffer.alloc(flagBytes);
-    const writer = new XdrWriter();
-
-    for (let index = 0; index < columns.length; index++) {
-      if (view.getInt16(columns[index].nullOffset, LITTLE_ENDIAN) !== 0) {
-        nullBitmap[index >> 3] |= 1 << (index & 7);
-      }
-    }
-
-    writer.writeBytes(nullBitmap);
-    writer.writeAlignment(nullBitmap.length);
-
-    for (let index = 0; index < columns.length; index++) {
-      if ((nullBitmap[index >> 3] & (1 << (index & 7))) !== 0) {
-        continue;
-      }
-
-      const column = columns[index];
-      switch (column.type) {
-        case sqlTypes.SQL_VARYING: {
-          const valueLength = view.getUint16(column.offset, LITTLE_ENDIAN);
-          writer.writeInt32(valueLength);
-          writer.writeBytes(source.subarray(column.offset + 2, column.offset + 2 + valueLength));
-          writer.writeAlignment(valueLength);
-          break;
-        }
-
-        case sqlTypes.SQL_DOUBLE: {
-          const buffer = Buffer.alloc(8);
-          buffer.writeDoubleBE(view.getFloat64(column.offset, LITTLE_ENDIAN), 0);
-          writer.writeBytes(buffer);
-          break;
-        }
-
-        case sqlTypes.SQL_TYPE_DATE:
-        case sqlTypes.SQL_TYPE_TIME:
-          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
-          break;
-
-        case sqlTypes.SQL_TIME_TZ_EX:
-          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
-          writer.writeInt32(view.getUint16(column.offset + 4, LITTLE_ENDIAN));
-          writer.writeInt32(this.encodeTimeZoneOffset(view.getInt16(column.offset + 6, LITTLE_ENDIAN)));
-          break;
-
-        case sqlTypes.SQL_TIMESTAMP:
-          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
-          break;
-
-        case sqlTypes.SQL_TIMESTAMP_TZ_EX:
-          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
-          writer.writeInt32(view.getUint16(column.offset + 8, LITTLE_ENDIAN));
-          writer.writeInt32(view.getInt16(column.offset + 10, LITTLE_ENDIAN));
-          break;
-
-        case sqlTypes.SQL_BOOLEAN:
-          writer.writeBytes(Buffer.from([source[column.offset] ?? 0]));
-          writer.writeAlignment(1);
-          break;
-
-        case sqlTypes.SQL_BLOB:
-          writer.writeBytes(source.subarray(column.offset, column.offset + 8));
-          break;
-
-        case sqlTypes.SQL_NULL:
-          break;
-
-        default:
-          throw new Error(`Unsupported Firebird column type ${column.type} while encoding a packed message.`);
-      }
-    }
-
-    return writer.toBuffer();
-  }
-
-  private encodeTimeZoneOffset(offsetMinutes: number): number {
-    return offsetMinutes + 1440;
   }
 }

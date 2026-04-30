@@ -4,9 +4,9 @@ import {
   getDriverTestDatabasePath,
   loadDriverTestConfig,
 } from '../../../node-firebird-driver/src/test/test-config';
-import { legacyHash } from '../lib/internal/auth/legacy-hash';
-import { WireProtocol } from '../lib/internal/wire-protocol';
-import { writeTraditionalClumplet } from '../lib/internal/xdr';
+import { legacyHash } from '../lib/auth/legacy-hash';
+import { WireProtocol } from '../lib/wire-protocol';
+import { writeTraditionalClumplet } from '../lib/xdr';
 
 describe('node-firebird-driver-wire', () => {
   const testConfig = loadDriverTestConfig();

@@ -3,7 +3,7 @@ import { AttachmentImpl } from './attachment';
 import { Blob, BlobSeekWhence, CreateBlobOptions } from 'node-firebird-driver';
 import { AbstractBlobStream, blobInfo, createBpb, getPortableInteger } from 'node-firebird-driver/dist/lib/impl';
 
-import { BlobHandle } from './internal/wire-protocol';
+import { BlobHandle } from './wire-protocol';
 import { TransactionImpl } from './transaction';
 
 const MAX_SEGMENT_SIZE = 65535;

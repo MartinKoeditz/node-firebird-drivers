@@ -1,5 +1,5 @@
 import { AttachmentImpl } from './attachment';
-import { EventHandle } from './internal/wire-protocol';
+import { EventHandle } from './wire-protocol';
 
 import { AbstractEvents } from 'node-firebird-driver/dist/lib/impl';
 

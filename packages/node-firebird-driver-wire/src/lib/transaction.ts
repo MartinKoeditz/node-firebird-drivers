@@ -4,7 +4,7 @@ import { createTpb } from './fb-util';
 import { TransactionOptions } from 'node-firebird-driver';
 import { AbstractTransaction } from 'node-firebird-driver/dist/lib/impl';
 
-import { TransactionHandle } from './internal/wire-protocol';
+import { TransactionHandle } from './wire-protocol';
 
 export class TransactionImpl extends AbstractTransaction {
   override attachment: AttachmentImpl;

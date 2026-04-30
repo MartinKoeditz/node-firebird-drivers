@@ -4,7 +4,7 @@ import { TransactionImpl } from './transaction';
 import { ExecuteQueryOptions, FetchOptions } from 'node-firebird-driver';
 import { AbstractResultSet } from 'node-firebird-driver/dist/lib/impl';
 
-import { CursorHandle } from './internal/wire-protocol';
+import { CursorHandle } from './wire-protocol';
 
 export class ResultSetImpl extends AbstractResultSet {
   override statement: StatementImpl;

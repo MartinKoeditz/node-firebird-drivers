@@ -7,7 +7,7 @@ import { AbstractStatement, commonInfo, getPortableInteger, statementInfo } from
 
 import { createDataReader, createDataWriter, createDescriptors, DataReader, DataWriter } from './fb-util';
 
-import { StatementHandle } from './internal/wire-protocol';
+import { StatementHandle } from './wire-protocol';
 
 export class StatementImpl extends AbstractStatement {
   override attachment: AttachmentImpl;

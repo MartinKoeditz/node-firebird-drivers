@@ -1,5 +1,5 @@
 import { Descriptor } from 'node-firebird-driver/dist/lib/impl';
-import { StatementColumn } from './internal/wire-protocol';
+import { StatementColumn } from './wire-protocol';
 
 export * from 'node-firebird-driver/dist/lib/impl';
 

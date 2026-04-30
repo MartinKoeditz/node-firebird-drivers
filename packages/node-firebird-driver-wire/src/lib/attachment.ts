@@ -1,5 +1,6 @@
 import { BlobStreamImpl } from './blob';
 import { ClientImpl } from './client';
+import { parseDatabaseUri } from './database-uri';
 import { EventsImpl } from './events';
 import { createDpb } from './fb-util';
 import { StatementImpl } from './statement';
@@ -15,35 +16,8 @@ import {
 } from 'node-firebird-driver';
 import { AbstractAttachment, cancelType } from 'node-firebird-driver/dist/lib/impl';
 
-import { AttachmentHandle, WireProtocol } from './internal/wire-protocol';
-
-interface ParsedDatabaseUri {
-  readonly host: string;
-  readonly port: number;
-  readonly database: string;
-}
-
-export function parseDatabaseUri(uri: string): ParsedDatabaseUri {
-  // Treat rooted Windows drive paths as hostless URIs.
-  if (/^[A-Za-z]:(?:[\\/]|$)/.test(uri)) {
-    return {
-      host: 'localhost',
-      port: 3050,
-      database: uri,
-    };
-  }
-
-  const match = /^(?:(.+?)(?:\/(\d+))?:)?(.+)$/.exec(uri);
-  if (!match) {
-    throw new Error(`Invalid Firebird database URI '${uri}'.`);
-  }
-
-  return {
-    host: match[1] || 'localhost',
-    port: match[2] ? parseInt(match[2], 10) : 3050,
-    database: match[3],
-  };
-}
+import { AttachmentHandle, WireProtocol } from './wire-protocol';
+export { parseDatabaseUri } from './database-uri';
 
 export class AttachmentImpl extends AbstractAttachment {
   override client: ClientImpl;

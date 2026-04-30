@@ -6,8 +6,8 @@ import {
   createWireCryptSession,
   parseWireCryptPluginData,
   Rc4StreamCipher,
-} from '../lib/internal/wire-crypt';
-import { writeTraditionalClumplet } from '../lib/internal/xdr';
+} from '../lib/wire-crypt';
+import { writeTraditionalClumplet } from '../lib/xdr';
 
 describe('wire crypt', () => {
   test('parses server wire crypt plugins in advertised order', () => {
