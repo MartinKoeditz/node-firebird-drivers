@@ -250,6 +250,59 @@ describe('node-firebird-driver-wire', () => {
     });
   });
 
+  test('queues and receives asynchronous events', async () => {
+    await withCreatedDatabase('wire-events.fdb', async (database) => {
+      const wireProtocol = createProtocol();
+
+      try {
+        const attachment = await wireProtocol.attach(database, createAttachDpb());
+        const transaction = await wireProtocol.startTransaction(createTpb());
+        const statement = await wireProtocol.allocateStatement();
+        let resolveCounters: (value: [string, number][]) => void = undefined!;
+        let rejectCounters: (reason?: unknown) => void = undefined!;
+        const countersPromise = new Promise<[string, number][]>((resolve, reject) => {
+          resolveCounters = resolve;
+          rejectCounters = reject;
+        });
+        const timeout = setTimeout(() => {
+          rejectCounters(new Error('Timed out waiting for Firebird events.'));
+        }, 5000);
+
+        const eventHandle = await wireProtocol.queueEvents(['EVENT1', 'EVENT2'], (counters) => {
+          clearTimeout(timeout);
+          resolveCounters(counters);
+        });
+
+        try {
+          await wireProtocol.prepareStatement(
+            transaction,
+            statement, `
+              execute block as
+              begin
+                post_event 'EVENT1';
+                post_event 'EVENT1';
+                post_event 'EVENT2';
+              end
+            `,
+          );
+          await wireProtocol.executeStatement(transaction, statement);
+          await wireProtocol.commit(transaction);
+          await expect(countersPromise).resolves.toStrictEqual([
+            ['EVENT1', 1],
+            ['EVENT2', 1],
+          ]);
+        } finally {
+          clearTimeout(timeout);
+          await wireProtocol.freeStatement(statement);
+          await wireProtocol.cancelEvents(eventHandle);
+          await wireProtocol.detach(attachment);
+        }
+      } finally {
+        await wireProtocol.close();
+      }
+    });
+  });
+
   test('opens a cursor for a prepared select and fetches raw messages', async () => {
     await withCreatedDatabase('wire-select-cursor.fdb', async (database) => {
       const wireProtocol = createProtocol();

@@ -81,6 +81,10 @@ export const CNCT_client_crypt = 11;
 export const WIRE_CRYPT_DISABLED = 0;
 export const WIRE_CRYPT_ENABLED = 1;
 
+export const P_REQ_async = 1;
+
+export const EPB_version1 = 1;
+
 export const isc_dpb_version1 = 1;
 export const isc_dpb_version2 = 2;
 export const isc_dpb_page_size = 4;

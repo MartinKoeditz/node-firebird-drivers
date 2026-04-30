@@ -37,6 +37,7 @@ import {
   CONNECT_VERSION3,
   DSQL_close,
   DSQL_drop,
+  EPB_version1,
   isc_dpb_auth_plugin_list,
   isc_dpb_auth_plugin_name,
   isc_dpb_specific_auth_data,
@@ -87,9 +88,13 @@ import {
   op_info_blob,
   op_info_sql,
   op_open_blob2,
+  op_que_events,
   op_ping,
   op_put_segment,
   op_prepare_statement,
+  op_connect_request,
+  op_cancel_events,
+  op_event,
   op_reject,
   op_response,
   op_rollback,
@@ -99,6 +104,7 @@ import {
   op_sql_response,
   op_transaction,
   ptype_batch_send,
+  P_REQ_async,
   SQL_BLOB,
   SQL_BOOLEAN,
   SQL_DEC16,
@@ -179,6 +185,13 @@ export interface CursorHandle {
   readonly fetchMessageLength: number;
 }
 
+export interface EventHandle {
+  readonly id: number;
+  readonly names: readonly string[];
+}
+
+type EventCallback = (counters: [string, number][]) => Promise<void> | void;
+
 interface AcceptMessage {
   readonly authenticated: boolean;
   readonly pluginName: string;
@@ -224,6 +237,19 @@ interface MutableStatementColumn {
   nullOffset: number;
 }
 
+interface EventMessage {
+  readonly database: number;
+  readonly items: Buffer;
+  readonly requestId: number;
+}
+
+interface EventSubscription {
+  readonly id: number;
+  readonly names: readonly string[];
+  readonly callback: EventCallback;
+  eventBuffer: Buffer;
+}
+
 const LITTLE_ENDIAN = endianness() === 'LE';
 const FETCH_NO_DATA = 100;
 
@@ -258,12 +284,17 @@ const INFO_BUFFER_LENGTH = 32767;
 export class WireProtocol {
   private socket?: Socket;
   private channel?: SocketChannel;
+  private eventSocket?: Socket;
+  private eventChannel?: SocketChannel;
+  private eventLoopPromise?: Promise<void>;
   private attachmentHandle?: number;
   private currentPluginName: AuthPluginName = 'Legacy_Auth';
   private currentPlugin?: ClientAuthPlugin;
   private clientAuthListSent = false;
   private readonly statementMetadata = new Map<number, StatementMetadata>();
   private readonly exhaustedCursors = new Set<number>();
+  private readonly eventSubscriptions = new Map<number, EventSubscription>();
+  private nextEventId = 1;
 
   constructor(private readonly options: WireProtocolOptions) {}
 
@@ -343,6 +374,76 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird ping failed');
+  }
+
+  async queueEvents(names: readonly string[], callback: EventCallback): Promise<EventHandle> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error('A database must be attached before queueing events.');
+    }
+
+    await this.ensureEventChannel();
+
+    const eventHandle: EventHandle = {
+      id: this.nextEventId++,
+      names: [...names],
+    };
+
+    const subscription: EventSubscription = {
+      ...eventHandle,
+      callback,
+      eventBuffer: this.buildEventBlock(names),
+    };
+    this.eventSubscriptions.set(eventHandle.id, subscription);
+
+    try {
+      const writer = new XdrWriter();
+      writer.writeInt32(op_que_events);
+      writer.writeInt32(this.attachmentHandle);
+      writer.writeBuffer(subscription.eventBuffer);
+      writer.writeInt32(0);
+      writer.writeInt32(0);
+      writer.writeInt32(subscription.id);
+      await this.channel.write(writer.toBuffer());
+
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while queueing events.`);
+      }
+
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird queue events failed');
+      return eventHandle;
+    } catch (error) {
+      this.eventSubscriptions.delete(subscription.id);
+      throw error;
+    }
+  }
+
+  async cancelEvents(event: EventHandle): Promise<void> {
+    const subscription = this.eventSubscriptions.get(event.id);
+    if (!subscription) {
+      return;
+    }
+
+    this.eventSubscriptions.delete(event.id);
+
+    if (!this.channel || this.attachmentHandle == undefined) {
+      return;
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_cancel_events);
+    writer.writeInt32(this.attachmentHandle);
+    writer.writeInt32(event.id);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while cancelling events.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird cancel events failed');
   }
 
   async startTransaction(tpb: Buffer): Promise<TransactionHandle> {
@@ -668,6 +769,13 @@ export class WireProtocol {
   }
 
   async close(): Promise<void> {
+    if (this.eventSocket) {
+      const eventSocket = this.eventSocket;
+      this.eventChannel = undefined;
+      this.eventSocket = undefined;
+      eventSocket.destroy();
+    }
+
     if (this.channel) {
       const writer = new XdrWriter();
       writer.writeInt32(op_disconnect);
@@ -684,6 +792,7 @@ export class WireProtocol {
     this.channel = undefined;
     this.socket = undefined;
     this.attachmentHandle = undefined;
+    this.eventSubscriptions.clear();
   }
 
   private async openSocket(): Promise<void> {
@@ -705,6 +814,50 @@ export class WireProtocol {
 
     this.socket = socket;
     this.channel = new SocketChannel(socket);
+  }
+
+  private async ensureEventChannel(): Promise<void> {
+    if (this.eventChannel) {
+      return;
+    }
+
+    if (!this.channel || this.attachmentHandle == undefined || !this.socket) {
+      throw new Error('A database must be attached before opening the event channel.');
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_connect_request);
+    writer.writeInt32(P_REQ_async);
+    writer.writeInt32(this.attachmentHandle);
+    writer.writeInt32(0);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while opening the event channel.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird open event channel failed');
+
+    const eventPort = this.parseAuxiliaryPort(response.data);
+    const eventHost = this.getEventHost();
+    const eventSocket = connectSocket({
+      host: eventHost,
+      port: eventPort,
+      timeout: this.options.timeoutMs ?? 5000,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      eventSocket.once('connect', () => resolve());
+      eventSocket.once('error', (error) => reject(error));
+      eventSocket.once('timeout', () => reject(new Error('Firebird event socket connection timed out.')));
+    });
+
+    this.eventSocket = eventSocket;
+    this.eventChannel = new SocketChannel(eventSocket);
+    this.eventLoopPromise = this.runEventLoop();
+    this.eventLoopPromise.catch(() => undefined);
   }
 
   private async finishTransaction(
@@ -1167,6 +1320,106 @@ export class WireProtocol {
     return Buffer.concat(parts);
   }
 
+  private buildEventBlock(names: readonly string[]): Buffer {
+    const parts = [Buffer.from([EPB_version1])];
+
+    for (const name of names) {
+      const encodedName = Buffer.from(name, 'utf8');
+      if (encodedName.length > 255) {
+        throw new Error(`Invalid event name '${name}'.`);
+      }
+
+      parts.push(Buffer.from([encodedName.length]));
+      parts.push(encodedName);
+      parts.push(Buffer.alloc(4));
+    }
+
+    return Buffer.concat(parts);
+  }
+
+  private calculateEventCounts(previous: Buffer, current: Buffer, names: readonly string[]): [string, number][] {
+    const counters: [string, number][] = [];
+    let previousOffset = 1;
+    let currentOffset = 1;
+
+    for (const name of names) {
+      const previousNameLength = previous[previousOffset++] ?? 0;
+      previousOffset += previousNameLength;
+
+      const currentNameLength = current[currentOffset++] ?? 0;
+      currentOffset += currentNameLength;
+
+      const previousCount = previous.readUInt32LE(previousOffset);
+      previousOffset += 4;
+
+      const currentCount = current.readUInt32LE(currentOffset);
+      currentOffset += 4;
+
+      counters.push([name, currentCount - previousCount]);
+    }
+
+    return counters;
+  }
+
+  private parseAuxiliaryPort(address: Buffer): number {
+    if (address.length < 4) {
+      throw new Error('Firebird returned an invalid auxiliary event address.');
+    }
+
+    return address.readUInt16BE(2);
+  }
+
+  private getEventHost(): string {
+    if (this.socket?.remoteAddress) {
+      return this.socket.remoteAddress.startsWith('::ffff:')
+        ? this.socket.remoteAddress.slice('::ffff:'.length)
+        : this.socket.remoteAddress;
+    }
+
+    return this.options.host;
+  }
+
+  private async runEventLoop(): Promise<void> {
+    try {
+      while (this.eventChannel) {
+        const operation = await this.readOperationFrom(this.eventChannel);
+        if (operation === op_event) {
+          const event = await this.readEventMessage(this.eventChannel);
+          await this.dispatchEvent(event);
+          continue;
+        }
+
+        if (operation === op_disconnect) {
+          break;
+        }
+
+        throw new Error(`Unexpected operation ${operation} on the Firebird event channel.`);
+      }
+    } catch (error) {
+      if (this.eventChannel) {
+        throw error;
+      }
+    } finally {
+      this.eventChannel = undefined;
+      if (this.eventSocket) {
+        const eventSocket = this.eventSocket;
+        this.eventSocket = undefined;
+        eventSocket.destroy();
+      }
+    }
+  }
+
+  private async dispatchEvent(event: EventMessage): Promise<void> {
+    const subscription = this.eventSubscriptions.get(event.requestId);
+    if (!subscription || event.database !== this.attachmentHandle) {
+      return;
+    }
+
+    const counters = this.calculateEventCounts(subscription.eventBuffer, event.items, subscription.names);
+    subscription.eventBuffer = Buffer.from(event.items);
+    await subscription.callback(counters);
+  }
+
   private getSystemUserName(): string {
     try {
       return userInfo().username || 'node-firebird-driver-wire';
@@ -1176,8 +1429,12 @@ export class WireProtocol {
   }
 
   private async readOperation(): Promise<number> {
+    return await this.readOperationFrom(this.channel!);
+  }
+
+  private async readOperationFrom(channel: SocketChannel): Promise<number> {
     while (true) {
-      const operationBuffer = await this.channel!.readExactly(4);
+      const operationBuffer = await channel.readExactly(4);
       const operation = operationBuffer.readInt32BE(0);
       if (operation !== op_dummy) {
         return operation;
@@ -1211,12 +1468,25 @@ export class WireProtocol {
     return { handle, objectId, quad, data, status };
   }
 
+  private async readEventMessage(channel: SocketChannel): Promise<EventMessage> {
+    const database = (await channel.readExactly(4)).readInt32BE(0);
+    const items = await this.readXdrBufferFrom(channel);
+    await channel.readExactly(4);
+    await channel.readExactly(4);
+    const requestId = (await channel.readExactly(4)).readInt32BE(0);
+    return { database, items, requestId };
+  }
+
   private async readXdrBuffer(): Promise<Buffer> {
-    const length = (await this.channel!.readExactly(4)).readInt32BE(0);
+    return await this.readXdrBufferFrom(this.channel!);
+  }
+
+  private async readXdrBufferFrom(channel: SocketChannel): Promise<Buffer> {
+    const length = (await channel.readExactly(4)).readInt32BE(0);
     if (length === 0) {
       return Buffer.alloc(0);
     }
-    const padded = await this.channel!.readExactly(length + ((4 - (length % 4)) & 3));
+    const padded = await channel.readExactly(length + ((4 - (length % 4)) & 3));
     return padded.subarray(0, length);
   }
 
