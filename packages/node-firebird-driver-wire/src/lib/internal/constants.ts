@@ -15,6 +15,8 @@ export const op_rollback = 31;
 export const op_commit_retaining = 50;
 export const op_allocate_statement = 62;
 export const op_execute = 63;
+export const op_fetch = 65;
+export const op_fetch_response = 66;
 export const op_free_statement = 67;
 export const op_prepare_statement = 68;
 export const op_dummy = 71;
@@ -94,8 +96,42 @@ export const isc_info_sql_owner = 18;
 export const isc_info_sql_alias = 19;
 export const isc_info_sql_stmt_type = 21;
 export const isc_info_sql_relation_alias = 25;
+export const isc_info_end = 1;
+export const isc_info_truncated = 2;
+
+export const isc_info_sql_stmt_select = 1;
+export const isc_info_sql_stmt_select_for_upd = 12;
 
 export const DSQL_drop = 2;
+
+export const SQL_TEXT = 452;
+export const SQL_VARYING = 448;
+export const SQL_SHORT = 500;
+export const SQL_LONG = 496;
+export const SQL_DOUBLE = 480;
+export const SQL_TIMESTAMP = 510;
+export const SQL_BLOB = 520;
+export const SQL_TYPE_TIME = 560;
+export const SQL_TYPE_DATE = 570;
+export const SQL_INT64 = 580;
+export const SQL_BOOLEAN = 32764;
+
+export const blr_text = 14;
+export const blr_short = 7;
+export const blr_long = 8;
+export const blr_double = 27;
+export const blr_timestamp = 35;
+export const blr_varying = 37;
+export const blr_sql_date = 12;
+export const blr_sql_time = 13;
+export const blr_int64 = 16;
+export const blr_blob2 = 17;
+export const blr_bool = 23;
+export const blr_version5 = 5;
+export const blr_eoc = 76;
+export const blr_end = 255;
+export const blr_begin = 2;
+export const blr_message = 4;
 
 export const AUTH_PLUGINS = ['Srp256', 'Srp', 'Legacy_Auth'] as const;
 export type AuthPluginName = (typeof AUTH_PLUGINS)[number];

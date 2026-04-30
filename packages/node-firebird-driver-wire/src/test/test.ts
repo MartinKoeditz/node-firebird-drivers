@@ -227,6 +227,61 @@ describe('node-firebird-driver-wire', () => {
     });
   });
 
+  test('opens a cursor for a prepared select and fetches raw messages', async () => {
+    await withCreatedDatabase('wire-select-cursor.fdb', async (database) => {
+      const wireProtocol = createProtocol();
+
+      try {
+        const attachment = await wireProtocol.attach(database, createAttachDpb());
+        const transaction = await wireProtocol.startTransaction(createTpb());
+        const ddlStatement = await wireProtocol.allocateStatement();
+        const insertStatement = await wireProtocol.allocateStatement();
+        const selectStatement = await wireProtocol.allocateStatement();
+
+        try {
+          await wireProtocol.prepareStatement(transaction, ddlStatement, 'create table t1 (n1 integer)');
+          await wireProtocol.executeStatement(transaction, ddlStatement);
+          await wireProtocol.commitRetaining(transaction);
+
+          await wireProtocol.prepareStatement(
+            transaction,
+            insertStatement,
+            'execute block as begin insert into t1 (n1) values (1); insert into t1 (n1) values (2); end',
+          );
+          await wireProtocol.executeStatement(transaction, insertStatement);
+
+          await wireProtocol.prepareStatement(transaction, selectStatement, 'select n1 from t1 order by n1');
+
+          const cursor = await wireProtocol.openCursor(transaction, selectStatement);
+          expect(cursor.columns.map((column) => column.alias)).toStrictEqual(['N1']);
+          expect(cursor.fetchBlr.length).toBeGreaterThan(0);
+          expect(cursor.fetchMessageLength).toBe(6);
+
+          const row1 = await wireProtocol.fetchNext(cursor);
+          expect(row1?.length).toBe(cursor.fetchMessageLength);
+          expect(row1?.readInt32LE(0)).toBe(1);
+          expect(row1?.readInt16LE(4)).toBe(0);
+
+          const row2 = await wireProtocol.fetchNext(cursor);
+          expect(row2?.length).toBe(cursor.fetchMessageLength);
+          expect(row2?.readInt32LE(0)).toBe(2);
+          expect(row2?.readInt16LE(4)).toBe(0);
+
+          await expect(wireProtocol.fetchNext(cursor)).resolves.toBeUndefined();
+        } finally {
+          await wireProtocol.freeStatement(selectStatement);
+          await wireProtocol.freeStatement(insertStatement);
+          await wireProtocol.freeStatement(ddlStatement);
+        }
+
+        await wireProtocol.rollback(transaction);
+        await wireProtocol.detach(attachment);
+      } finally {
+        await wireProtocol.close();
+      }
+    });
+  });
+
   test('returns a structured Firebird error for invalid SQL preparation', async () => {
     await withCreatedDatabase('wire-invalid-prepare.fdb', async (database) => {
       const wireProtocol = createProtocol();

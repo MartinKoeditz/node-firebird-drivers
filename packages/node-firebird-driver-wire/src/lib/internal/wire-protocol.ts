@@ -1,11 +1,28 @@
 import { Buffer } from 'node:buffer';
-import { Socket, connect as connectSocket } from 'node:net';
-import { hostname, userInfo } from 'node:os';
+import { connect as connectSocket, Socket } from 'node:net';
+import { endianness, hostname, userInfo } from 'node:os';
 
+import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
   arch_generic,
   AUTH_PLUGINS,
   AuthPluginName,
+  blr_begin,
+  blr_blob2,
+  blr_bool,
+  blr_double,
+  blr_end,
+  blr_eoc,
+  blr_int64,
+  blr_long,
+  blr_message,
+  blr_short,
+  blr_sql_date,
+  blr_sql_time,
+  blr_text,
+  blr_timestamp,
+  blr_varying,
+  blr_version5,
   CNCT_client_crypt,
   CNCT_host,
   CNCT_login,
@@ -22,6 +39,7 @@ import {
   isc_dpb_utf8_filename,
   isc_dpb_version1,
   isc_dpb_version2,
+  isc_info_end,
   isc_info_sql_alias,
   isc_info_sql_bind,
   isc_info_sql_describe_end,
@@ -34,16 +52,19 @@ import {
   isc_info_sql_scale,
   isc_info_sql_select,
   isc_info_sql_sqlda_seq,
+  isc_info_sql_stmt_select,
+  isc_info_sql_stmt_select_for_upd,
   isc_info_sql_stmt_type,
   isc_info_sql_sub_type,
   isc_info_sql_type,
+  isc_info_truncated,
   op_accept,
   op_accept_data,
   op_allocate_statement,
   op_attach,
-  op_cond_accept,
   op_commit,
   op_commit_retaining,
+  op_cond_accept,
   op_connect,
   op_cont_auth,
   op_create,
@@ -52,6 +73,8 @@ import {
   op_drop_database,
   op_dummy,
   op_execute,
+  op_fetch,
+  op_fetch_response,
   op_free_statement,
   op_ping,
   op_prepare_statement,
@@ -61,10 +84,20 @@ import {
   op_rollback_retaining,
   op_transaction,
   ptype_batch_send,
+  SQL_BLOB,
+  SQL_BOOLEAN,
+  SQL_DOUBLE,
+  SQL_INT64,
+  SQL_LONG,
+  SQL_SHORT,
+  SQL_TEXT,
+  SQL_TIMESTAMP,
+  SQL_TYPE_DATE,
+  SQL_TYPE_TIME,
+  SQL_VARYING,
   SUPPORTED_PROTOCOLS,
   WIRE_CRYPT_ENABLED,
 } from './constants';
-import { createAuthPlugin, ClientAuthPlugin } from './auth/plugins';
 import { SocketChannel } from './socket-channel';
 import { assertSuccessfulResponse, parseStatusVector } from './status';
 import { writeTraditionalClumplet, writeWideClumplet, writeWideStringClumplet, XdrWriter } from './xdr';
@@ -89,6 +122,24 @@ export interface StatementHandle {
   readonly handle: number;
 }
 
+export interface StatementColumn {
+  readonly alias: string;
+  readonly field: string;
+  readonly relation: string;
+  readonly type: number;
+  readonly subType: number;
+  readonly scale: number;
+  readonly length: number;
+  readonly nullable: boolean;
+}
+
+export interface CursorHandle {
+  readonly statement: StatementHandle;
+  readonly columns: readonly StatementColumn[];
+  readonly fetchBlr: Buffer;
+  readonly fetchMessageLength: number;
+}
+
 interface AcceptMessage {
   readonly authenticated: boolean;
   readonly pluginName: string;
@@ -106,6 +157,35 @@ interface DpbClumplet {
   readonly tag: number;
   readonly value: Buffer;
 }
+
+interface StatementMetadata {
+  readonly type: number;
+  readonly columns: readonly StatementColumn[];
+  readonly fetchBlr: Buffer;
+  readonly fetchMessageLength: number;
+}
+
+interface MutableStatementColumn {
+  alias: string;
+  field: string;
+  relation: string;
+  type: number;
+  subType: number;
+  scale: number;
+  length: number;
+  nullable: boolean;
+}
+
+interface FetchLayoutColumn {
+  readonly type: number;
+  readonly length: number;
+  readonly scale: number;
+  readonly offset: number;
+  readonly nullOffset: number;
+}
+
+const LITTLE_ENDIAN = endianness() === 'LE';
+const FETCH_NO_DATA = 100;
 
 const PREPARE_STATEMENT_INFO_ITEMS = Buffer.from([
   isc_info_sql_stmt_type,
@@ -140,6 +220,8 @@ export class WireProtocol {
   private currentPluginName: AuthPluginName = 'Legacy_Auth';
   private currentPlugin?: ClientAuthPlugin;
   private clientAuthListSent = false;
+  private readonly statementMetadata = new Map<number, StatementMetadata>();
+  private readonly exhaustedCursors = new Set<number>();
 
   constructor(private readonly options: WireProtocolOptions) {}
 
@@ -305,6 +387,7 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
+    this.statementMetadata.set(statement.handle, this.parseStatementMetadata(response.data));
   }
 
   async executeStatement(transaction: TransactionHandle, statement: StatementHandle): Promise<void> {
@@ -333,6 +416,76 @@ export class WireProtocol {
     assertSuccessfulResponse(response.status, 'Firebird execute statement failed');
   }
 
+  async openCursor(transaction: TransactionHandle, statement: StatementHandle): Promise<CursorHandle> {
+    const metadata = this.statementMetadata.get(statement.handle);
+    if (!metadata) {
+      throw new Error('Statement metadata is not available. Prepare the statement before opening a cursor.');
+    }
+
+    if (metadata.type !== isc_info_sql_stmt_select && metadata.type !== isc_info_sql_stmt_select_for_upd) {
+      throw new Error('Statement does not produce a selectable cursor.');
+    }
+
+    await this.executeStatement(transaction, statement);
+    this.exhaustedCursors.delete(statement.handle);
+    return {
+      statement,
+      columns: metadata.columns,
+      fetchBlr: metadata.fetchBlr,
+      fetchMessageLength: metadata.fetchMessageLength,
+    };
+  }
+
+  async fetchNext(cursor: CursorHandle): Promise<Buffer | undefined> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error('A database must be attached before fetching from a cursor.');
+    }
+
+    const metadata = this.statementMetadata.get(cursor.statement.handle);
+    if (!metadata) {
+      throw new Error('Statement metadata is not available for cursor fetch.');
+    }
+
+    if (this.exhaustedCursors.has(cursor.statement.handle)) {
+      return undefined;
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_fetch);
+    writer.writeInt32(cursor.statement.handle);
+    writer.writeBuffer(cursor.fetchBlr);
+    writer.writeInt32(0);
+    writer.writeInt32(1);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_fetch_response) {
+      throw new Error(`Unexpected operation ${operation} while fetching a cursor row.`);
+    }
+
+    const status = (await this.channel.readExactly(4)).readInt32BE(0);
+    const messages = (await this.channel.readExactly(4)).readInt32BE(0);
+
+    if (messages === 0) {
+      if (status === FETCH_NO_DATA) {
+        this.exhaustedCursors.add(cursor.statement.handle);
+        return undefined;
+      }
+      if (status === 0) {
+        return undefined;
+      }
+      throw new Error(`Firebird cursor fetch failed with status ${status}.`);
+    }
+
+    if (messages !== 1) {
+      throw new Error(`Unsupported cursor fetch batch size ${messages}.`);
+    }
+
+    const rowBuffer = await this.readFetchRowBuffer(metadata);
+    await this.readFetchBatchMarker(cursor.statement.handle);
+    return rowBuffer;
+  }
+
   async freeStatement(statement: StatementHandle): Promise<void> {
     if (!this.channel || this.attachmentHandle == undefined) {
       throw new Error('A database must be attached before freeing a statement.');
@@ -351,6 +504,8 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird free statement failed');
+    this.statementMetadata.delete(statement.handle);
+    this.exhaustedCursors.delete(statement.handle);
   }
 
   async close(): Promise<void> {
@@ -767,5 +922,400 @@ export class WireProtocol {
       }
     }
     return Buffer.concat(chunks);
+  }
+
+  private parseStatementMetadata(data: Buffer): StatementMetadata {
+    const columns: MutableStatementColumn[] = [];
+    let statementType = 0;
+    let outputSection = false;
+    let offset = 0;
+
+    while (offset < data.length) {
+      const item = data[offset++];
+      if (item === isc_info_end) {
+        break;
+      }
+
+      switch (item) {
+        case isc_info_sql_stmt_type:
+          ({ value: statementType, nextOffset: offset } = this.readInfoNumeric(data, offset));
+          break;
+
+        case isc_info_sql_select:
+          outputSection = true;
+          break;
+
+        case isc_info_sql_bind:
+          outputSection = false;
+          break;
+
+        case isc_info_sql_describe_vars: {
+          ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
+
+          let currentColumn: MutableStatementColumn | undefined;
+          while (offset < data.length) {
+            const describeItem = data[offset++];
+            if (describeItem === isc_info_sql_describe_end) {
+              break;
+            }
+
+            if (describeItem === isc_info_end || describeItem === isc_info_truncated) {
+              offset--;
+              break;
+            }
+
+            switch (describeItem) {
+              case isc_info_sql_sqlda_seq: {
+                const sequenceInfo = this.readInfoNumeric(data, offset);
+                const sequence = sequenceInfo.value;
+                offset = sequenceInfo.nextOffset;
+                if (!outputSection) {
+                  break;
+                }
+
+                while (columns.length < sequence) {
+                  columns.push({
+                    alias: '',
+                    field: '',
+                    relation: '',
+                    type: 0,
+                    subType: 0,
+                    scale: 0,
+                    length: 0,
+                    nullable: false,
+                  });
+                }
+
+                currentColumn = columns[sequence - 1];
+                break;
+              }
+
+              case isc_info_sql_type: {
+                const typeInfo = this.readInfoNumeric(data, offset);
+                const type = typeInfo.value;
+                offset = typeInfo.nextOffset;
+                if (currentColumn) {
+                  currentColumn.type = type & ~1;
+                  currentColumn.nullable = (type & 1) !== 0;
+                }
+                break;
+              }
+
+              case isc_info_sql_sub_type:
+                if (currentColumn) {
+                  const info = this.readInfoNumeric(data, offset);
+                  currentColumn.subType = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
+                }
+                break;
+
+              case isc_info_sql_scale:
+                if (currentColumn) {
+                  const info = this.readInfoNumeric(data, offset);
+                  currentColumn.scale = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
+                }
+                break;
+
+              case isc_info_sql_length:
+                if (currentColumn) {
+                  const info = this.readInfoNumeric(data, offset);
+                  currentColumn.length = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
+                }
+                break;
+
+              case isc_info_sql_field:
+                if (currentColumn) {
+                  const info = this.readInfoString(data, offset);
+                  currentColumn.field = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoString(data, offset));
+                }
+                break;
+
+              case isc_info_sql_relation:
+                if (currentColumn) {
+                  const info = this.readInfoString(data, offset);
+                  currentColumn.relation = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoString(data, offset));
+                }
+                break;
+
+              case isc_info_sql_alias:
+                if (currentColumn) {
+                  const info = this.readInfoString(data, offset);
+                  currentColumn.alias = info.value;
+                  offset = info.nextOffset;
+                } else {
+                  ({ nextOffset: offset } = this.readInfoString(data, offset));
+                }
+                break;
+
+              default:
+                ({ nextOffset: offset } = this.readInfoString(data, offset));
+                break;
+            }
+          }
+          break;
+        }
+
+        default:
+          ({ nextOffset: offset } = this.readInfoString(data, offset));
+          break;
+      }
+    }
+
+    const fetchFormat = this.buildFetchFormat(columns);
+    return {
+      type: statementType,
+      columns,
+      fetchBlr: fetchFormat.blr,
+      fetchMessageLength: fetchFormat.messageLength,
+    };
+  }
+
+  private readInfoNumeric(data: Buffer, offset: number): { value: number; nextOffset: number } {
+    const length = data.readUInt16LE(offset);
+    const valueOffset = offset + 2;
+    return {
+      value: this.readLittleEndianInteger(data, valueOffset, length),
+      nextOffset: valueOffset + length,
+    };
+  }
+
+  private readInfoString(data: Buffer, offset: number): { value: string; nextOffset: number } {
+    const length = data.readUInt16LE(offset);
+    const valueOffset = offset + 2;
+    return {
+      value: data.subarray(valueOffset, valueOffset + length).toString('utf8'),
+      nextOffset: valueOffset + length,
+    };
+  }
+
+  private readLittleEndianInteger(buffer: Buffer, offset: number, length: number): number {
+    let value = 0;
+    for (let i = 0; i < length; i++) {
+      value += buffer[offset + i] << (8 * i);
+    }
+
+    if (length > 0 && (buffer[offset + length - 1] & 0x80) !== 0) {
+      value -= 2 ** (length * 8);
+    }
+
+    return value;
+  }
+
+  private buildFetchFormat(columns: readonly StatementColumn[]): { blr: Buffer; messageLength: number } {
+    let messageLength = 0;
+    const fieldCount = columns.length * 2;
+    const parts = [blr_version5, blr_begin, blr_message, 0, fieldCount & 0xff, (fieldCount >> 8) & 0xff];
+
+    for (const column of columns) {
+      const { blr, alignment, length } = this.describeColumnType(column);
+      if (alignment > 1) {
+        messageLength = this.align(messageLength, alignment);
+      }
+
+      messageLength += length;
+      messageLength = this.align(messageLength, 2) + 2;
+
+      parts.push(...blr, blr_short, 0);
+    }
+
+    parts.push(blr_end, blr_eoc);
+    return { blr: Buffer.from(parts), messageLength };
+  }
+
+  private describeColumnType(column: StatementColumn): { blr: number[]; alignment: number; length: number } {
+    switch (column.type) {
+      case SQL_TEXT:
+        return {
+          blr: [blr_text, column.length & 0xff, (column.length >> 8) & 0xff],
+          alignment: 1,
+          length: column.length,
+        };
+      case SQL_VARYING:
+        return {
+          blr: [blr_varying, column.length & 0xff, (column.length >> 8) & 0xff],
+          alignment: 2,
+          length: column.length + 2,
+        };
+      case SQL_SHORT:
+        return { blr: [blr_short, column.scale & 0xff], alignment: 2, length: 2 };
+      case SQL_LONG:
+        return { blr: [blr_long, column.scale & 0xff], alignment: 4, length: 4 };
+      case SQL_INT64:
+        return { blr: [blr_int64, column.scale & 0xff], alignment: 8, length: 8 };
+      case SQL_DOUBLE:
+        return { blr: [blr_double], alignment: 8, length: 8 };
+      case SQL_TIMESTAMP:
+        return { blr: [blr_timestamp], alignment: 4, length: 8 };
+      case SQL_TYPE_DATE:
+        return { blr: [blr_sql_date], alignment: 4, length: 4 };
+      case SQL_TYPE_TIME:
+        return { blr: [blr_sql_time], alignment: 4, length: 4 };
+      case SQL_BOOLEAN:
+        return { blr: [blr_bool], alignment: 1, length: 1 };
+      case SQL_BLOB:
+        return { blr: [blr_blob2, column.subType & 0xff, (column.subType >> 8) & 0xff, 0, 0], alignment: 4, length: 8 };
+      default:
+        throw new Error(`Unsupported Firebird column type ${column.type} for cursor fetch.`);
+    }
+  }
+
+  private async readFetchRowBuffer(metadata: StatementMetadata): Promise<Buffer> {
+    const layout = this.buildFetchLayout(metadata.columns);
+    const rowBuffer = Buffer.alloc(metadata.fetchMessageLength);
+    const view = new DataView(rowBuffer.buffer, rowBuffer.byteOffset, rowBuffer.byteLength);
+    const flagBytes = Math.ceil(layout.length / 8);
+    const nullBitmap = await this.readPaddedOpaque(flagBytes);
+
+    for (let index = 0; index < layout.length; index++) {
+      const column = layout[index];
+      const isNull = (nullBitmap[index >> 3] & (1 << (index & 7))) !== 0;
+      view.setInt16(column.nullOffset, isNull ? -1 : 0, LITTLE_ENDIAN);
+      if (isNull) {
+        continue;
+      }
+
+      switch (column.type) {
+        case SQL_TEXT: {
+          const value = await this.readPaddedOpaque(column.length);
+          value.copy(rowBuffer, column.offset);
+          break;
+        }
+
+        case SQL_VARYING: {
+          const valueLength = await this.readXdrInt32();
+          const value = await this.readPaddedOpaque(valueLength);
+          view.setUint16(column.offset, valueLength, LITTLE_ENDIAN);
+          value.copy(rowBuffer, column.offset + 2);
+          break;
+        }
+
+        case SQL_SHORT:
+          view.setInt16(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          break;
+
+        case SQL_LONG:
+        case SQL_TYPE_DATE:
+        case SQL_TYPE_TIME:
+          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          break;
+
+        case SQL_INT64:
+          view.setBigInt64(column.offset, await this.readXdrInt64(), LITTLE_ENDIAN);
+          break;
+
+        case SQL_DOUBLE: {
+          const value = await this.channel!.readExactly(8);
+          view.setFloat64(column.offset, value.readDoubleBE(0), LITTLE_ENDIAN);
+          break;
+        }
+
+        case SQL_TIMESTAMP:
+          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
+          break;
+
+        case SQL_BOOLEAN: {
+          const value = await this.readPaddedOpaque(1);
+          rowBuffer[column.offset] = value[0] ?? 0;
+          break;
+        }
+
+        case SQL_BLOB: {
+          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
+          break;
+        }
+
+        default:
+          throw new Error(`Unsupported Firebird column type ${column.type} while reading a cursor row.`);
+      }
+    }
+
+    return rowBuffer;
+  }
+
+  private async readPaddedOpaque(length: number): Promise<Buffer> {
+    if (length === 0) {
+      return Buffer.alloc(0);
+    }
+
+    const paddedLength = length + ((4 - (length % 4)) & 3);
+    const value = await this.channel!.readExactly(paddedLength);
+    return value.subarray(0, length);
+  }
+
+  private async readXdrInt32(): Promise<number> {
+    return (await this.channel!.readExactly(4)).readInt32BE(0);
+  }
+
+  private async readXdrInt64(): Promise<bigint> {
+    return (await this.channel!.readExactly(8)).readBigInt64BE(0);
+  }
+
+  private async readFetchBatchMarker(statementHandle: number): Promise<void> {
+    const operation = await this.readOperation();
+    if (operation !== op_fetch_response) {
+      throw new Error(`Unexpected operation ${operation} while completing a cursor fetch batch.`);
+    }
+
+    const status = (await this.channel!.readExactly(4)).readInt32BE(0);
+    const messages = (await this.channel!.readExactly(4)).readInt32BE(0);
+    if (messages !== 0) {
+      throw new Error(`Unexpected trailing fetch batch payload size ${messages}.`);
+    }
+
+    if (status === FETCH_NO_DATA) {
+      this.exhaustedCursors.add(statementHandle);
+      return;
+    }
+
+    if (status !== 0) {
+      throw new Error(`Firebird cursor fetch batch failed with status ${status}.`);
+    }
+  }
+
+  private buildFetchLayout(columns: readonly StatementColumn[]): FetchLayoutColumn[] {
+    const layout: FetchLayoutColumn[] = [];
+    let messageLength = 0;
+
+    for (const column of columns) {
+      const { alignment, length } = this.describeColumnType(column);
+      if (alignment > 1) {
+        messageLength = this.align(messageLength, alignment);
+      }
+
+      const offset = messageLength;
+      messageLength += length;
+      const nullOffset = this.align(messageLength, 2);
+      messageLength = nullOffset + 2;
+
+      layout.push({
+        type: column.type,
+        length: column.length,
+        scale: column.scale,
+        offset,
+        nullOffset,
+      });
+    }
+
+    return layout;
+  }
+
+  private align(value: number, alignment: number): number {
+    return alignment > 1 ? (value + alignment - 1) & ~(alignment - 1) : value;
   }
 }
