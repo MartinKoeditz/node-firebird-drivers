@@ -278,17 +278,17 @@ describe('node-firebird-driver-wire', () => {
           const cursor = await wireProtocol.openCursor(transaction, selectStatement);
           expect(cursor.columns.map((column) => column.alias)).toStrictEqual(['N1']);
           expect(cursor.fetchBlr.length).toBeGreaterThan(0);
-          expect(cursor.fetchMessageLength).toBe(6);
+          expect(cursor.fetchMessageLength).toBe(10);
 
           const row1 = await wireProtocol.fetchNext(cursor);
           expect(row1?.length).toBe(cursor.fetchMessageLength);
-          expect(row1?.readInt32LE(0)).toBe(1);
-          expect(row1?.readInt16LE(4)).toBe(0);
+          expect(row1?.readDoubleLE(0)).toBe(1); // integer converted to double
+          expect(row1?.readInt16LE(8)).toBe(0);
 
           const row2 = await wireProtocol.fetchNext(cursor);
           expect(row2?.length).toBe(cursor.fetchMessageLength);
-          expect(row2?.readInt32LE(0)).toBe(2);
-          expect(row2?.readInt16LE(4)).toBe(0);
+          expect(row2?.readDoubleLE(0)).toBe(2); // integer converted to double
+          expect(row2?.readInt16LE(8)).toBe(0);
 
           await expect(wireProtocol.fetchNext(cursor)).resolves.toBeUndefined();
         } finally {

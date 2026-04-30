@@ -13,9 +13,12 @@ import {
   blr_double,
   blr_end,
   blr_eoc,
+  blr_ex_time_tz,
+  blr_ex_timestamp_tz,
   blr_int64,
   blr_long,
   blr_message,
+  blr_null,
   blr_short,
   blr_sql_date,
   blr_sql_time,
@@ -32,6 +35,7 @@ import {
   CNCT_user,
   CNCT_user_verification,
   CONNECT_VERSION3,
+  DSQL_close,
   DSQL_drop,
   isc_dpb_auth_plugin_list,
   isc_dpb_auth_plugin_name,
@@ -52,8 +56,7 @@ import {
   isc_info_sql_scale,
   isc_info_sql_select,
   isc_info_sql_sqlda_seq,
-  isc_info_sql_stmt_select,
-  isc_info_sql_stmt_select_for_upd,
+  isc_info_sql_stmt_flags,
   isc_info_sql_stmt_type,
   isc_info_sql_sub_type,
   isc_info_sql_type,
@@ -75,11 +78,14 @@ import {
   op_drop_database,
   op_dummy,
   op_execute,
+  op_execute2,
   op_fetch,
   op_fetch_response,
   op_free_statement,
   op_get_segment,
   op_close_blob,
+  op_info_blob,
+  op_info_sql,
   op_open_blob2,
   op_ping,
   op_put_segment,
@@ -89,19 +95,31 @@ import {
   op_rollback,
   op_rollback_retaining,
   op_seek_blob,
+  op_set_cursor,
+  op_sql_response,
   op_transaction,
   ptype_batch_send,
   SQL_BLOB,
   SQL_BOOLEAN,
+  SQL_DEC16,
+  SQL_DEC34,
   SQL_DOUBLE,
+  SQL_FLOAT,
+  SQL_INT128,
   SQL_INT64,
   SQL_LONG,
+  SQL_NULL,
   SQL_SHORT,
   SQL_TEXT,
   SQL_TIMESTAMP,
+  SQL_TIMESTAMP_TZ,
+  SQL_TIMESTAMP_TZ_EX,
   SQL_TYPE_DATE,
   SQL_TYPE_TIME,
+  SQL_TIME_TZ,
+  SQL_TIME_TZ_EX,
   SQL_VARYING,
+  STATEMENT_FLAG_HAS_CURSOR,
   SUPPORTED_PROTOCOLS,
   WIRE_CRYPT_ENABLED,
 } from './constants';
@@ -144,10 +162,14 @@ export interface StatementColumn {
   readonly field: string;
   readonly relation: string;
   readonly type: number;
+  readonly originalType: number;
   readonly subType: number;
+  readonly charSet: number;
   readonly scale: number;
   readonly length: number;
   readonly nullable: boolean;
+  readonly offset: number;
+  readonly nullOffset: number;
 }
 
 export interface CursorHandle {
@@ -178,9 +200,13 @@ interface DpbClumplet {
 
 interface StatementMetadata {
   readonly type: number;
-  readonly columns: readonly StatementColumn[];
-  readonly fetchBlr: Buffer;
-  readonly fetchMessageLength: number;
+  readonly flags: number;
+  readonly inputColumns: readonly StatementColumn[];
+  readonly outputColumns: readonly StatementColumn[];
+  readonly inputBlr: Buffer;
+  readonly inputMessageLength: number;
+  readonly outputBlr: Buffer;
+  readonly outputMessageLength: number;
 }
 
 interface MutableStatementColumn {
@@ -188,25 +214,21 @@ interface MutableStatementColumn {
   field: string;
   relation: string;
   type: number;
+  originalType: number;
   subType: number;
+  charSet: number;
   scale: number;
   length: number;
   nullable: boolean;
-}
-
-interface FetchLayoutColumn {
-  readonly type: number;
-  readonly length: number;
-  readonly scale: number;
-  readonly offset: number;
-  readonly nullOffset: number;
+  offset: number;
+  nullOffset: number;
 }
 
 const LITTLE_ENDIAN = endianness() === 'LE';
 const FETCH_NO_DATA = 100;
 
-const PREPARE_STATEMENT_INFO_ITEMS = Buffer.from([
-  isc_info_sql_stmt_type,
+const STATEMENT_BASE_INFO_ITEMS = Buffer.from([isc_info_sql_stmt_type, isc_info_sql_stmt_flags]);
+const STATEMENT_SELECT_INFO_ITEMS = Buffer.from([
   isc_info_sql_select,
   isc_info_sql_describe_vars,
   isc_info_sql_sqlda_seq,
@@ -220,6 +242,8 @@ const PREPARE_STATEMENT_INFO_ITEMS = Buffer.from([
   isc_info_sql_relation_alias,
   isc_info_sql_owner,
   isc_info_sql_describe_end,
+]);
+const STATEMENT_BIND_INFO_ITEMS = Buffer.from([
   isc_info_sql_bind,
   isc_info_sql_describe_vars,
   isc_info_sql_sqlda_seq,
@@ -229,7 +253,7 @@ const PREPARE_STATEMENT_INFO_ITEMS = Buffer.from([
   isc_info_sql_length,
   isc_info_sql_describe_end,
 ]);
-const PREPARE_STATEMENT_INFO_BUFFER_LENGTH = 32767;
+const INFO_BUFFER_LENGTH = 32767;
 
 export class WireProtocol {
   private socket?: Socket;
@@ -482,8 +506,8 @@ export class WireProtocol {
     writer.writeInt32(statement.handle);
     writer.writeInt32(sqlDialect);
     writer.writeString(sql);
-    writer.writeBuffer(PREPARE_STATEMENT_INFO_ITEMS);
-    writer.writeInt32(PREPARE_STATEMENT_INFO_BUFFER_LENGTH);
+    writer.writeBuffer(STATEMENT_BASE_INFO_ITEMS);
+    writer.writeInt32(INFO_BUFFER_LENGTH);
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
@@ -493,52 +517,95 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
-    this.statementMetadata.set(statement.handle, this.parseStatementMetadata(response.data));
+    // FIXME: Do single getInfo
+    const selectInfo = await this.getInfo(
+      op_info_sql,
+      statement.handle,
+      STATEMENT_SELECT_INFO_ITEMS,
+      'statement output metadata',
+    );
+    const bindInfo = await this.getInfo(
+      op_info_sql,
+      statement.handle,
+      STATEMENT_BIND_INFO_ITEMS,
+      'statement input metadata',
+    );
+    const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
+    this.statementMetadata.set(statement.handle, this.parseStatementMetadata(metadataInfo));
   }
 
-  async executeStatement(transaction: TransactionHandle, statement: StatementHandle): Promise<void> {
+  async executeStatement(
+    transaction: TransactionHandle,
+    statement: StatementHandle,
+    inputMessage?: Buffer,
+  ): Promise<Buffer | undefined> {
+    return await this.executePreparedStatement(transaction, statement, inputMessage, false);
+  }
+
+  async executeStatementReturning(
+    transaction: TransactionHandle,
+    statement: StatementHandle,
+    inputMessage?: Buffer,
+  ): Promise<Buffer | undefined> {
+    return await this.executePreparedStatement(transaction, statement, inputMessage, true);
+  }
+
+  async setCursorName(statement: StatementHandle, cursorName: string): Promise<void> {
     if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before executing a statement.');
+      throw new Error('A database must be attached before setting a cursor name.');
     }
 
     const writer = new XdrWriter();
-    writer.writeInt32(op_execute);
+    writer.writeInt32(op_set_cursor);
     writer.writeInt32(statement.handle);
-    writer.writeInt32(transaction.handle);
-    writer.writeBuffer(Buffer.alloc(0));
-    writer.writeInt32(0);
-    writer.writeInt32(0);
-    writer.writeInt32(0);
-    writer.writeInt32(0);
+    writer.writeString(cursorName);
     writer.writeInt32(0);
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
     if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while executing a statement.`);
+      throw new Error(`Unexpected operation ${operation} while setting a cursor name.`);
     }
 
     const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird execute statement failed');
+    assertSuccessfulResponse(response.status, 'Firebird set cursor name failed');
   }
 
-  async openCursor(transaction: TransactionHandle, statement: StatementHandle): Promise<CursorHandle> {
+  async getSqlInfo(statement: StatementHandle, items: Buffer): Promise<Buffer> {
+    return await this.getInfo(op_info_sql, statement.handle, items, 'sql info');
+  }
+
+  async getBlobInfo(blob: BlobHandle, items: Buffer): Promise<Buffer> {
+    return await this.getInfo(op_info_blob, blob.handle, items, 'blob info');
+  }
+
+  getStatementMetadata(statement: StatementHandle): StatementMetadata {
     const metadata = this.statementMetadata.get(statement.handle);
     if (!metadata) {
-      throw new Error('Statement metadata is not available. Prepare the statement before opening a cursor.');
+      throw new Error('Statement metadata is not available.');
     }
 
-    if (metadata.type !== isc_info_sql_stmt_select && metadata.type !== isc_info_sql_stmt_select_for_upd) {
-      throw new Error('Statement does not produce a selectable cursor.');
+    return metadata;
+  }
+
+  async openCursor(
+    transaction: TransactionHandle,
+    statement: StatementHandle,
+    inputMessage?: Buffer,
+  ): Promise<CursorHandle> {
+    const metadata = this.getStatementMetadata(statement);
+
+    if ((metadata.flags & STATEMENT_FLAG_HAS_CURSOR) === 0) {
+      throw new Error('Statement does not produce a cursor.');
     }
 
-    await this.executeStatement(transaction, statement);
+    await this.executePreparedStatement(transaction, statement, inputMessage, false);
     this.exhaustedCursors.delete(statement.handle);
     return {
       statement,
-      columns: metadata.columns,
-      fetchBlr: metadata.fetchBlr,
-      fetchMessageLength: metadata.fetchMessageLength,
+      columns: metadata.outputColumns,
+      fetchBlr: metadata.outputBlr,
+      fetchMessageLength: metadata.outputMessageLength,
     };
   }
 
@@ -587,31 +654,17 @@ export class WireProtocol {
       throw new Error(`Unsupported cursor fetch batch size ${messages}.`);
     }
 
-    const rowBuffer = await this.readFetchRowBuffer(metadata);
+    const rowBuffer = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
     await this.readFetchBatchMarker(cursor.statement.handle);
     return rowBuffer;
   }
 
+  async closeCursor(statement: StatementHandle): Promise<void> {
+    await this.finishStatement(statement, DSQL_close, 'close cursor');
+  }
+
   async freeStatement(statement: StatementHandle): Promise<void> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before freeing a statement.');
-    }
-
-    const writer = new XdrWriter();
-    writer.writeInt32(op_free_statement);
-    writer.writeInt32(statement.handle);
-    writer.writeInt32(DSQL_drop);
-    await this.channel.write(writer.toBuffer());
-
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while freeing a statement.`);
-    }
-
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird free statement failed');
-    this.statementMetadata.delete(statement.handle);
-    this.exhaustedCursors.delete(statement.handle);
+    await this.finishStatement(statement, DSQL_drop, 'free statement');
   }
 
   async close(): Promise<void> {
@@ -677,6 +730,31 @@ export class WireProtocol {
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
   }
 
+  private async finishStatement(statement: StatementHandle, option: number, actionName: string): Promise<void> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error(`A database must be attached before ${actionName}.`);
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_free_statement);
+    writer.writeInt32(statement.handle);
+    writer.writeInt32(option);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
+
+    if ((option & DSQL_drop) !== 0) {
+      this.statementMetadata.delete(statement.handle);
+      this.exhaustedCursors.delete(statement.handle);
+    }
+  }
+
   private async openOrCreateBlob(
     operationCode: number,
     transaction: TransactionHandle,
@@ -729,6 +807,81 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
+  }
+
+  private async executePreparedStatement(
+    transaction: TransactionHandle,
+    statement: StatementHandle,
+    inputMessage: Buffer | undefined,
+    withOutput: boolean,
+  ): Promise<Buffer | undefined> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error('A database must be attached before executing a statement.');
+    }
+
+    const metadata = this.getStatementMetadata(statement);
+    const writer = new XdrWriter();
+    writer.writeInt32(withOutput ? op_execute2 : op_execute);
+    writer.writeInt32(statement.handle);
+    writer.writeInt32(transaction.handle);
+    writer.writeBuffer(metadata.inputBlr);
+    writer.writeInt32(0);
+    writer.writeInt32(metadata.inputColumns.length > 0 ? 1 : 0);
+
+    if (metadata.inputColumns.length > 0) {
+      writer.writeBytes(this.buildPackedMessage(metadata.inputColumns, metadata.inputMessageLength, inputMessage));
+    }
+
+    if (withOutput) {
+      writer.writeBuffer(metadata.outputBlr);
+      writer.writeInt32(0);
+    }
+
+    writer.writeInt32(0);
+    writer.writeInt32(0);
+    writer.writeInt32(0);
+    await this.channel.write(writer.toBuffer());
+
+    let outputMessage: Buffer | undefined;
+    let operation = await this.readOperation();
+    if (withOutput && operation === op_sql_response) {
+      const messages = (await this.channel.readExactly(4)).readInt32BE(0);
+      if (messages > 0) {
+        outputMessage = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
+      }
+      operation = await this.readOperation();
+    }
+
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while executing a statement.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird execute statement failed');
+    return outputMessage;
+  }
+
+  private async getInfo(operationCode: number, handle: number, items: Buffer, actionName: string): Promise<Buffer> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error(`A database must be attached before ${actionName}.`);
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(operationCode);
+    writer.writeInt32(handle);
+    writer.writeInt32(0);
+    writer.writeBuffer(items);
+    writer.writeInt32(INFO_BUFFER_LENGTH);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while executing ${actionName}.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
+    return response.data;
   }
 
   private async writeConnect(database: string): Promise<void> {
@@ -889,6 +1042,16 @@ export class WireProtocol {
   private buildRemainingPluginList(currentPluginName: AuthPluginName): string {
     const index = AUTH_PLUGINS.indexOf(currentPluginName);
     return index === -1 ? currentPluginName : AUTH_PLUGINS.slice(index).join(',');
+  }
+
+  private concatInfoBuffers(buffers: readonly Buffer[]): Buffer {
+    return Buffer.concat(
+      buffers
+        .filter((buffer) => buffer.length > 0)
+        .map((buffer, index) =>
+          index + 1 < buffers.length && buffer[buffer.length - 1] === isc_info_end ? buffer.subarray(0, -1) : buffer,
+        ),
+    );
   }
 
   private buildAttachmentDpb(baseDpb: Buffer, attachAuthData: Buffer | undefined): Buffer {
@@ -1086,8 +1249,10 @@ export class WireProtocol {
   }
 
   private parseStatementMetadata(data: Buffer): StatementMetadata {
-    const columns: MutableStatementColumn[] = [];
+    const inputColumns: MutableStatementColumn[] = [];
+    const outputColumns: MutableStatementColumn[] = [];
     let statementType = 0;
+    let statementFlags = 0;
     let outputSection = false;
     let offset = 0;
 
@@ -1102,6 +1267,10 @@ export class WireProtocol {
           ({ value: statementType, nextOffset: offset } = this.readInfoNumeric(data, offset));
           break;
 
+        case isc_info_sql_stmt_flags:
+          ({ value: statementFlags, nextOffset: offset } = this.readInfoNumeric(data, offset));
+          break;
+
         case isc_info_sql_select:
           outputSection = true;
           break;
@@ -1111,16 +1280,31 @@ export class WireProtocol {
           break;
 
         case isc_info_sql_describe_vars: {
-          ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
+          const describeInfo = this.readInfoNumeric(data, offset);
+          offset = describeInfo.nextOffset;
+
+          if (describeInfo.value === 0) {
+            break;
+          }
 
           let currentColumn: MutableStatementColumn | undefined;
+          let remainingVariables = describeInfo.value;
           while (offset < data.length) {
             const describeItem = data[offset++];
             if (describeItem === isc_info_sql_describe_end) {
-              break;
+              currentColumn = undefined;
+              if (--remainingVariables <= 0) {
+                break;
+              }
+              continue;
             }
 
-            if (describeItem === isc_info_end || describeItem === isc_info_truncated) {
+            if (
+              describeItem === isc_info_end ||
+              describeItem === isc_info_truncated ||
+              describeItem === isc_info_sql_select ||
+              describeItem === isc_info_sql_bind
+            ) {
               offset--;
               break;
             }
@@ -1130,24 +1314,26 @@ export class WireProtocol {
                 const sequenceInfo = this.readInfoNumeric(data, offset);
                 const sequence = sequenceInfo.value;
                 offset = sequenceInfo.nextOffset;
-                if (!outputSection) {
-                  break;
-                }
+                const targetColumns = outputSection ? outputColumns : inputColumns;
 
-                while (columns.length < sequence) {
-                  columns.push({
+                while (targetColumns.length < sequence) {
+                  targetColumns.push({
                     alias: '',
                     field: '',
                     relation: '',
                     type: 0,
+                    originalType: 0,
                     subType: 0,
+                    charSet: 0,
                     scale: 0,
                     length: 0,
                     nullable: false,
+                    offset: 0,
+                    nullOffset: 0,
                   });
                 }
 
-                currentColumn = columns[sequence - 1];
+                currentColumn = targetColumns[sequence - 1];
                 break;
               }
 
@@ -1156,6 +1342,7 @@ export class WireProtocol {
                 const type = typeInfo.value;
                 offset = typeInfo.nextOffset;
                 if (currentColumn) {
+                  currentColumn.originalType = type & ~1;
                   currentColumn.type = type & ~1;
                   currentColumn.nullable = (type & 1) !== 0;
                 }
@@ -1166,6 +1353,7 @@ export class WireProtocol {
                 if (currentColumn) {
                   const info = this.readInfoNumeric(data, offset);
                   currentColumn.subType = info.value;
+                  currentColumn.charSet = info.value;
                   offset = info.nextOffset;
                 } else {
                   ({ nextOffset: offset } = this.readInfoNumeric(data, offset));
@@ -1236,30 +1424,46 @@ export class WireProtocol {
       }
     }
 
-    const fetchFormat = this.buildFetchFormat(columns);
+    const normalizedInputColumns = this.normalizeColumns(inputColumns);
+    const normalizedOutputColumns = this.normalizeColumns(outputColumns);
+    const inputFormat = this.buildMessageFormat(normalizedInputColumns);
+    const outputFormat = this.buildMessageFormat(normalizedOutputColumns);
     return {
       type: statementType,
-      columns,
-      fetchBlr: fetchFormat.blr,
-      fetchMessageLength: fetchFormat.messageLength,
+      flags: statementFlags,
+      inputColumns: normalizedInputColumns,
+      outputColumns: normalizedOutputColumns,
+      inputBlr: inputFormat.blr,
+      inputMessageLength: inputFormat.messageLength,
+      outputBlr: outputFormat.blr,
+      outputMessageLength: outputFormat.messageLength,
     };
   }
 
   private readInfoNumeric(data: Buffer, offset: number): { value: number; nextOffset: number } {
+    if (offset + 2 > data.length) {
+      return { value: 0, nextOffset: data.length };
+    }
+
     const length = data.readUInt16LE(offset);
     const valueOffset = offset + 2;
     return {
       value: this.readLittleEndianInteger(data, valueOffset, length),
-      nextOffset: valueOffset + length,
+      nextOffset: Math.min(valueOffset + length, data.length),
     };
   }
 
   private readInfoString(data: Buffer, offset: number): { value: string; nextOffset: number } {
+    if (offset + 2 > data.length) {
+      return { value: '', nextOffset: data.length };
+    }
+
     const length = data.readUInt16LE(offset);
     const valueOffset = offset + 2;
+    const endOffset = Math.min(valueOffset + length, data.length);
     return {
-      value: data.subarray(valueOffset, valueOffset + length).toString('utf8'),
-      nextOffset: valueOffset + length,
+      value: data.subarray(valueOffset, endOffset).toString('utf8'),
+      nextOffset: endOffset,
     };
   }
 
@@ -1276,7 +1480,58 @@ export class WireProtocol {
     return value;
   }
 
-  private buildFetchFormat(columns: readonly StatementColumn[]): { blr: Buffer; messageLength: number } {
+  // FIXME: This should not be here
+  private normalizeColumns(columns: readonly MutableStatementColumn[]): StatementColumn[] {
+    return columns.map((column) => {
+      const normalized = { ...column };
+
+      switch (normalized.type) {
+        case SQL_TEXT:
+          normalized.type = SQL_VARYING;
+          break;
+
+        case SQL_SHORT:
+        case SQL_LONG:
+        case SQL_INT64:
+        case SQL_FLOAT:
+          normalized.type = SQL_DOUBLE;
+          normalized.subType = 0;
+          normalized.scale = 0;
+          normalized.length = 8;
+          break;
+
+        case SQL_TIME_TZ:
+          normalized.type = SQL_TIME_TZ_EX;
+          normalized.subType = 0;
+          normalized.length = 8;
+          break;
+
+        case SQL_TIMESTAMP_TZ:
+          normalized.type = SQL_TIMESTAMP_TZ_EX;
+          normalized.subType = 0;
+          normalized.length = 12;
+          break;
+
+        case SQL_INT128:
+        case SQL_DEC16:
+        case SQL_DEC34:
+          normalized.type = SQL_VARYING;
+          normalized.subType = 2;
+          normalized.charSet = 2;
+          normalized.scale = 0;
+          normalized.length = 45;
+          break;
+      }
+
+      if (normalized.type !== SQL_TEXT && normalized.type !== SQL_VARYING) {
+        normalized.charSet = 0;
+      }
+
+      return normalized;
+    });
+  }
+
+  private buildMessageFormat(columns: MutableStatementColumn[]): { blr: Buffer; messageLength: number } {
     let messageLength = 0;
     const fieldCount = columns.length * 2;
     const parts = [blr_version5, blr_begin, blr_message, 0, fieldCount & 0xff, (fieldCount >> 8) & 0xff];
@@ -1287,8 +1542,13 @@ export class WireProtocol {
         messageLength = this.align(messageLength, alignment);
       }
 
+      const offset = messageLength;
       messageLength += length;
-      messageLength = this.align(messageLength, 2) + 2;
+      const nullOffset = this.align(messageLength, 2);
+      messageLength = nullOffset + 2;
+
+      column.offset = offset;
+      column.nullOffset = nullOffset;
 
       parts.push(...blr, blr_short, 0);
     }
@@ -1325,24 +1585,33 @@ export class WireProtocol {
         return { blr: [blr_sql_date], alignment: 4, length: 4 };
       case SQL_TYPE_TIME:
         return { blr: [blr_sql_time], alignment: 4, length: 4 };
+      case SQL_TIME_TZ_EX:
+        return { blr: [blr_ex_time_tz], alignment: 4, length: 8 };
       case SQL_BOOLEAN:
         return { blr: [blr_bool], alignment: 1, length: 1 };
       case SQL_BLOB:
-        return { blr: [blr_blob2, column.subType & 0xff, (column.subType >> 8) & 0xff, 0, 0], alignment: 4, length: 8 };
+        return {
+          blr: [blr_blob2, column.subType & 0xff, (column.subType >> 8) & 0xff, 0, 0],
+          alignment: 4,
+          length: 8,
+        };
+      case SQL_TIMESTAMP_TZ_EX:
+        return { blr: [blr_ex_timestamp_tz], alignment: 4, length: 12 };
+      case SQL_NULL:
+        return { blr: [blr_null], alignment: 1, length: 0 };
       default:
         throw new Error(`Unsupported Firebird column type ${column.type} for cursor fetch.`);
     }
   }
 
-  private async readFetchRowBuffer(metadata: StatementMetadata): Promise<Buffer> {
-    const layout = this.buildFetchLayout(metadata.columns);
-    const rowBuffer = Buffer.alloc(metadata.fetchMessageLength);
+  private async readPackedMessageBuffer(columns: readonly StatementColumn[], messageLength: number): Promise<Buffer> {
+    const rowBuffer = Buffer.alloc(messageLength);
     const view = new DataView(rowBuffer.buffer, rowBuffer.byteOffset, rowBuffer.byteLength);
-    const flagBytes = Math.ceil(layout.length / 8);
+    const flagBytes = Math.ceil(columns.length / 8);
     const nullBitmap = await this.readPaddedOpaque(flagBytes);
 
-    for (let index = 0; index < layout.length; index++) {
-      const column = layout[index];
+    for (let index = 0; index < columns.length; index++) {
+      const column = columns[index];
       const isNull = (nullBitmap[index >> 3] & (1 << (index & 7))) !== 0;
       view.setInt16(column.nullOffset, isNull ? -1 : 0, LITTLE_ENDIAN);
       if (isNull) {
@@ -1364,18 +1633,15 @@ export class WireProtocol {
           break;
         }
 
-        case SQL_SHORT:
-          view.setInt16(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          break;
-
-        case SQL_LONG:
         case SQL_TYPE_DATE:
         case SQL_TYPE_TIME:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
-        case SQL_INT64:
-          view.setBigInt64(column.offset, await this.readXdrInt64(), LITTLE_ENDIAN);
+        case SQL_TIME_TZ_EX:
+          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 4, await this.readXdrInt16(), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 6, await this.readXdrInt16(), LITTLE_ENDIAN);
           break;
 
         case SQL_DOUBLE: {
@@ -1389,6 +1655,13 @@ export class WireProtocol {
           view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
+        case SQL_TIMESTAMP_TZ_EX:
+          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
+          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 8, await this.readXdrInt16(), LITTLE_ENDIAN);
+          view.setInt16(column.offset + 10, await this.readXdrInt16(), LITTLE_ENDIAN);
+          break;
+
         case SQL_BOOLEAN: {
           const value = await this.readPaddedOpaque(1);
           rowBuffer[column.offset] = value[0] ?? 0;
@@ -1396,10 +1669,13 @@ export class WireProtocol {
         }
 
         case SQL_BLOB: {
-          view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
-          view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
+          const value = await this.channel!.readExactly(8);
+          value.copy(rowBuffer, column.offset);
           break;
         }
+
+        case SQL_NULL:
+          break;
 
         default:
           throw new Error(`Unsupported Firebird column type ${column.type} while reading a cursor row.`);
@@ -1423,8 +1699,8 @@ export class WireProtocol {
     return (await this.channel!.readExactly(4)).readInt32BE(0);
   }
 
-  private async readXdrInt64(): Promise<bigint> {
-    return (await this.channel!.readExactly(8)).readBigInt64BE(0);
+  private async readXdrInt16(): Promise<number> {
+    return (await this.channel!.readExactly(4)).readInt16BE(0);
   }
 
   private async readFetchBatchMarker(statementHandle: number): Promise<void> {
@@ -1449,34 +1725,96 @@ export class WireProtocol {
     }
   }
 
-  private buildFetchLayout(columns: readonly StatementColumn[]): FetchLayoutColumn[] {
-    const layout: FetchLayoutColumn[] = [];
-    let messageLength = 0;
-
-    for (const column of columns) {
-      const { alignment, length } = this.describeColumnType(column);
-      if (alignment > 1) {
-        messageLength = this.align(messageLength, alignment);
-      }
-
-      const offset = messageLength;
-      messageLength += length;
-      const nullOffset = this.align(messageLength, 2);
-      messageLength = nullOffset + 2;
-
-      layout.push({
-        type: column.type,
-        length: column.length,
-        scale: column.scale,
-        offset,
-        nullOffset,
-      });
-    }
-
-    return layout;
-  }
-
   private align(value: number, alignment: number): number {
     return alignment > 1 ? (value + alignment - 1) & ~(alignment - 1) : value;
+  }
+
+  private buildPackedMessage(
+    columns: readonly StatementColumn[],
+    messageLength: number,
+    message: Buffer | undefined,
+  ): Buffer {
+    const source = message ?? Buffer.alloc(messageLength);
+    if (source.length !== messageLength) {
+      throw new Error(`Incorrect statement input message length ${source.length}, expected ${messageLength}.`);
+    }
+
+    const view = new DataView(source.buffer, source.byteOffset, source.byteLength);
+    const flagBytes = Math.ceil(columns.length / 8);
+    const nullBitmap = Buffer.alloc(flagBytes);
+    const writer = new XdrWriter();
+
+    for (let index = 0; index < columns.length; index++) {
+      if (view.getInt16(columns[index].nullOffset, LITTLE_ENDIAN) !== 0) {
+        nullBitmap[index >> 3] |= 1 << (index & 7);
+      }
+    }
+
+    writer.writeBytes(nullBitmap);
+    writer.writeAlignment(nullBitmap.length);
+
+    for (let index = 0; index < columns.length; index++) {
+      if ((nullBitmap[index >> 3] & (1 << (index & 7))) !== 0) {
+        continue;
+      }
+
+      const column = columns[index];
+      switch (column.type) {
+        case SQL_VARYING: {
+          const valueLength = view.getUint16(column.offset, LITTLE_ENDIAN);
+          writer.writeInt32(valueLength);
+          writer.writeBytes(source.subarray(column.offset + 2, column.offset + 2 + valueLength));
+          writer.writeAlignment(valueLength);
+          break;
+        }
+
+        case SQL_DOUBLE: {
+          const buffer = Buffer.alloc(8);
+          buffer.writeDoubleBE(view.getFloat64(column.offset, LITTLE_ENDIAN), 0);
+          writer.writeBytes(buffer);
+          break;
+        }
+
+        case SQL_TYPE_DATE:
+        case SQL_TYPE_TIME:
+          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
+          break;
+
+        case SQL_TIME_TZ_EX:
+          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt16(column.offset + 4, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt16(column.offset + 6, LITTLE_ENDIAN));
+          break;
+
+        case SQL_TIMESTAMP:
+          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
+          break;
+
+        case SQL_TIMESTAMP_TZ_EX:
+          writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt16(column.offset + 8, LITTLE_ENDIAN));
+          writer.writeInt32(view.getInt16(column.offset + 10, LITTLE_ENDIAN));
+          break;
+
+        case SQL_BOOLEAN:
+          writer.writeBytes(Buffer.from([source[column.offset] ?? 0]));
+          writer.writeAlignment(1);
+          break;
+
+        case SQL_BLOB:
+          writer.writeBytes(source.subarray(column.offset, column.offset + 8));
+          break;
+
+        case SQL_NULL:
+          break;
+
+        default:
+          throw new Error(`Unsupported Firebird column type ${column.type} while encoding a packed message.`);
+      }
+    }
+
+    return writer.toBuffer();
   }
 }
