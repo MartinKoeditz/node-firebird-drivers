@@ -27,7 +27,10 @@ describe('wire crypt', () => {
     const keys = Buffer.concat([
       writeTraditionalClumplet(0, Buffer.from('Symmetric', 'latin1')),
       writeTraditionalClumplet(1, Buffer.from('ChaCha64,ChaCha,Arc4', 'latin1')),
-      writeTraditionalClumplet(3, Buffer.concat([Buffer.from('ChaCha64\0', 'latin1'), Buffer.from('0000004a00000000', 'hex')])),
+      writeTraditionalClumplet(
+        3,
+        Buffer.concat([Buffer.from('ChaCha64\0', 'latin1'), Buffer.from('0000004a00000000', 'hex')]),
+      ),
       writeTraditionalClumplet(3, Buffer.concat([Buffer.from('ChaCha\0', 'latin1'), chaChaIv])),
     ]);
 
@@ -59,10 +62,7 @@ describe('wire crypt', () => {
   });
 
   test('chacha stream cipher matches the RFC 7539 test vector', () => {
-    const key = Buffer.from(
-      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
-      'hex',
-    );
+    const key = Buffer.from('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'hex');
     const nonce = Buffer.from('000000000000004a00000000', 'hex');
     const plaintext = Buffer.from(
       "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.",
@@ -89,10 +89,7 @@ describe('wire crypt', () => {
   });
 
   test('chacha64 stream cipher matches the libtomcrypt test vector', () => {
-    const key = Buffer.from(
-      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
-      'hex',
-    );
+    const key = Buffer.from('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'hex');
     const nonce = Buffer.from('0000004a00000000', 'hex');
     const plaintext = Buffer.from(
       "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.",
@@ -120,7 +117,12 @@ describe('wire crypt', () => {
     ]);
 
     const session = createWireCryptSession([keys], sessionKey)!;
-    const reference = new ChaChaStreamCipher(createHash('sha256').update(sessionKey).digest(), iv.subarray(0, 12), 0n, 32);
+    const reference = new ChaChaStreamCipher(
+      createHash('sha256').update(sessionKey).digest(),
+      iv.subarray(0, 12),
+      0n,
+      32,
+    );
     const payload = Buffer.from('wire crypt payload', 'utf8');
 
     expect(session.pluginName).toBe('ChaCha');

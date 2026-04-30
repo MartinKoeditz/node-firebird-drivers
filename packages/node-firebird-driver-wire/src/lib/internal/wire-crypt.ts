@@ -319,7 +319,10 @@ function parseKnownServerKeys(buffer: Buffer): KnownServerKey[] {
         continue;
       }
 
-      currentSpecificData.set(value.subarray(0, separator).toString('latin1'), Buffer.from(value.subarray(separator + 1)));
+      currentSpecificData.set(
+        value.subarray(0, separator).toString('latin1'),
+        Buffer.from(value.subarray(separator + 1)),
+      );
     }
   }
 
