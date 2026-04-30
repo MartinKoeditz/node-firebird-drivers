@@ -3,8 +3,18 @@ import {
   getDriverTestDatabasePath,
   loadDriverTestConfig,
 } from '../../../node-firebird-driver/src/test/test-config';
+import {
+  isc_dpb_lc_ctype,
+  isc_dpb_overwrite,
+  isc_dpb_page_size,
+  isc_dpb_sql_dialect,
+  isc_dpb_user_name,
+  isc_dpb_utf8_filename,
+  isc_dpb_version1,
+} from '../lib/internal/constants';
 import { legacyHash } from '../lib/internal/auth/legacy-hash';
 import { WireProtocol } from '../lib/internal/wire-protocol';
+import { writeTraditionalClumplet } from '../lib/internal/xdr';
 
 describe('node-firebird-driver-wire', () => {
   const testConfig = loadDriverTestConfig();
@@ -12,6 +22,30 @@ describe('node-firebird-driver-wire', () => {
   const validPassword = testConfig.password!;
   const host = testConfig.host!;
   const port = testConfig.port!;
+
+  function createAttachDpb(): Buffer {
+    return Buffer.concat([
+      Buffer.from([isc_dpb_version1]),
+      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(username, 'utf8')),
+      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
+      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
+    ]);
+  }
+
+  function createDatabaseDpb(overwrite = false): Buffer {
+    const pageSize = Buffer.alloc(4);
+    pageSize.writeUInt32LE(4096, 0);
+
+    return Buffer.concat([
+      Buffer.from([isc_dpb_version1]),
+      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(username, 'utf8')),
+      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
+      writeTraditionalClumplet(isc_dpb_sql_dialect, Buffer.from([3])),
+      writeTraditionalClumplet(isc_dpb_page_size, pageSize),
+      writeTraditionalClumplet(isc_dpb_overwrite, Buffer.from([overwrite ? 1 : 0])),
+      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
+    ]);
+  }
 
   function createProtocol(password = validPassword): WireProtocol {
     return new WireProtocol({
@@ -29,7 +63,7 @@ describe('node-firebird-driver-wire', () => {
   async function withCreatedDatabase<T>(name: string, callback: (database: string) => Promise<T>): Promise<T> {
     const database = getDriverTestDatabasePath(testConfig, name);
     const createProtocolInstance = createProtocol(validPassword);
-    const createdAttachment = await createProtocolInstance.createDatabase(database, { overwrite: true });
+    const createdAttachment = await createProtocolInstance.createDatabase(database, createDatabaseDpb(true));
 
     try {
       await createProtocolInstance.detach(createdAttachment);
@@ -42,7 +76,7 @@ describe('node-firebird-driver-wire', () => {
     } finally {
       const dropProtocol = createProtocol(validPassword);
       try {
-        const attachment = await dropProtocol.attach(database);
+        const attachment = await dropProtocol.attach(database, createAttachDpb());
         await dropProtocol.dropDatabase(attachment);
       } finally {
         await dropProtocol.close();
@@ -55,7 +89,7 @@ describe('node-firebird-driver-wire', () => {
       const wireProtocol = createProtocol();
 
       try {
-        const wireAttachment = await wireProtocol.attach(database);
+        const wireAttachment = await wireProtocol.attach(database, createAttachDpb());
         expect(wireAttachment.handle).toBeGreaterThanOrEqual(0);
         await wireProtocol.detach(wireAttachment);
       } finally {
@@ -69,7 +103,7 @@ describe('node-firebird-driver-wire', () => {
       const wireProtocol = createProtocol();
 
       try {
-        const wireAttachment = await wireProtocol.attach(database);
+        const wireAttachment = await wireProtocol.attach(database, createAttachDpb());
         await expect(wireProtocol.ping()).resolves.toBeUndefined();
         await wireProtocol.detach(wireAttachment);
       } finally {
@@ -82,7 +116,7 @@ describe('node-firebird-driver-wire', () => {
     await withCreatedDatabase('wire-bad-password.fdb', async (database) => {
       const wireProtocol = createProtocol('wrong-password');
 
-      await expect(wireProtocol.attach(database)).rejects.toThrow(/Firebird|gds=/);
+      await expect(wireProtocol.attach(database, createAttachDpb())).rejects.toThrow(/Firebird|gds=/);
       await wireProtocol.close();
     });
   });

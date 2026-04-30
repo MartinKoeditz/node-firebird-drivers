@@ -17,12 +17,7 @@ import {
   CONNECT_VERSION3,
   isc_dpb_auth_plugin_list,
   isc_dpb_auth_plugin_name,
-  isc_dpb_lc_ctype,
-  isc_dpb_overwrite,
-  isc_dpb_page_size,
   isc_dpb_specific_auth_data,
-  isc_dpb_sql_dialect,
-  isc_dpb_user_name,
   isc_dpb_utf8_filename,
   isc_dpb_version1,
   isc_dpb_version2,
@@ -62,11 +57,6 @@ export interface AttachmentHandle {
   readonly handle: number;
 }
 
-export interface CreateDatabaseOptions {
-  readonly pageSize?: number;
-  readonly overwrite?: boolean;
-}
-
 interface AcceptMessage {
   readonly authenticated: boolean;
   readonly pluginName: string;
@@ -80,6 +70,11 @@ interface ResponseMessage {
   readonly status: ReturnType<typeof parseStatusVector>;
 }
 
+interface DpbClumplet {
+  readonly tag: number;
+  readonly value: Buffer;
+}
+
 export class WireProtocol {
   private socket?: Socket;
   private channel?: SocketChannel;
@@ -90,31 +85,24 @@ export class WireProtocol {
 
   constructor(private readonly options: WireProtocolOptions) {}
 
-  async attach(database: string): Promise<AttachmentHandle> {
+  async attach(database: string, dpb: Buffer): Promise<AttachmentHandle> {
     if (this.attachmentHandle) {
       throw new Error('A database is already attached on this protocol instance.');
     }
 
     await this.openSocket();
     const attachAuthData = await this.performConnectHandshake(database);
-    return await this.executeAttachmentOperation(op_attach, database, this.buildAttachDpb(), attachAuthData, 'attach');
+    return await this.executeAttachmentOperation(op_attach, database, dpb, attachAuthData, 'attach');
   }
 
-  async createDatabase(database: string, options?: CreateDatabaseOptions): Promise<AttachmentHandle> {
+  async createDatabase(database: string, dpb: Buffer): Promise<AttachmentHandle> {
     if (this.attachmentHandle) {
       throw new Error('A database is already attached on this protocol instance.');
     }
 
     await this.openSocket();
     const attachAuthData = await this.performConnectHandshake(database);
-    return await this.executeAttachmentOperation(
-      op_create,
-      database,
-      this.buildCreateDatabaseDpb(options),
-      attachAuthData,
-      'create',
-      options,
-    );
+    return await this.executeAttachmentOperation(op_create, database, dpb, attachAuthData, 'create');
   }
 
   async detach(attachment: AttachmentHandle): Promise<void> {
@@ -258,60 +246,6 @@ export class WireProtocol {
     await this.channel!.write(writer.toBuffer());
   }
 
-  private buildAttachDpb(): Buffer {
-    return Buffer.concat([
-      Buffer.from([isc_dpb_version1]),
-      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(this.options.username, 'utf8')),
-      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
-      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
-    ]);
-  }
-
-  private buildWideAttachDpb(attachAuthData: Buffer): Buffer {
-    return Buffer.concat([
-      Buffer.from([isc_dpb_version2]),
-      writeWideStringClumplet(isc_dpb_user_name, this.options.username),
-      writeWideStringClumplet(isc_dpb_lc_ctype, 'UTF8'),
-      writeWideClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
-      writeWideStringClumplet(isc_dpb_auth_plugin_name, this.currentPluginName),
-      writeWideStringClumplet(isc_dpb_auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
-      writeWideClumplet(isc_dpb_specific_auth_data, attachAuthData),
-    ]);
-  }
-
-  private buildWideCreateDatabaseDpb(attachAuthData: Buffer, options?: CreateDatabaseOptions): Buffer {
-    const pageSize = Buffer.alloc(4);
-    pageSize.writeUInt32LE(options?.pageSize ?? 4096, 0);
-
-    return Buffer.concat([
-      Buffer.from([isc_dpb_version2]),
-      writeWideStringClumplet(isc_dpb_user_name, this.options.username),
-      writeWideStringClumplet(isc_dpb_lc_ctype, 'UTF8'),
-      writeWideClumplet(isc_dpb_sql_dialect, Buffer.from([3])),
-      writeWideClumplet(isc_dpb_page_size, pageSize),
-      writeWideClumplet(isc_dpb_overwrite, Buffer.from([options?.overwrite ? 1 : 0])),
-      writeWideClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
-      writeWideStringClumplet(isc_dpb_auth_plugin_name, this.currentPluginName),
-      writeWideStringClumplet(isc_dpb_auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
-      writeWideClumplet(isc_dpb_specific_auth_data, attachAuthData),
-    ]);
-  }
-
-  private buildCreateDatabaseDpb(options?: CreateDatabaseOptions): Buffer {
-    const pageSize = Buffer.alloc(4);
-    pageSize.writeUInt32LE(options?.pageSize ?? 4096, 0);
-
-    return Buffer.concat([
-      Buffer.from([isc_dpb_version1]),
-      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(this.options.username, 'utf8')),
-      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
-      writeTraditionalClumplet(isc_dpb_sql_dialect, Buffer.from([3])),
-      writeTraditionalClumplet(isc_dpb_page_size, pageSize),
-      writeTraditionalClumplet(isc_dpb_overwrite, Buffer.from([options?.overwrite ? 1 : 0])),
-      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
-    ]);
-  }
-
   private async performConnectHandshake(database: string): Promise<Buffer | undefined> {
     this.currentPluginName = AUTH_PLUGINS[0];
     this.currentPlugin = createAuthPlugin(this.currentPluginName, this.options.password);
@@ -362,13 +296,8 @@ export class WireProtocol {
     baseDpb: Buffer,
     attachAuthData: Buffer | undefined,
     actionName: string,
-    options?: CreateDatabaseOptions,
   ): Promise<AttachmentHandle> {
-    const dpb = attachAuthData
-      ? operation === op_create
-        ? this.buildWideCreateDatabaseDpb(attachAuthData, options)
-        : this.buildWideAttachDpb(attachAuthData)
-      : baseDpb;
+    const dpb = this.buildAttachmentDpb(baseDpb, attachAuthData);
     await this.writeAttachmentOperation(operation, database, dpb);
 
     while (true) {
@@ -433,6 +362,33 @@ export class WireProtocol {
     return index === -1 ? currentPluginName : AUTH_PLUGINS.slice(index).join(',');
   }
 
+  private buildAttachmentDpb(baseDpb: Buffer, attachAuthData: Buffer | undefined): Buffer {
+    if (!attachAuthData) {
+      return baseDpb;
+    }
+
+    const clumplets = this.readDpbClumplets(baseDpb).filter(
+      ({ tag }) =>
+        tag !== isc_dpb_auth_plugin_name && tag !== isc_dpb_auth_plugin_list && tag !== isc_dpb_specific_auth_data,
+    );
+
+    const parts = [
+      Buffer.from([isc_dpb_version2]),
+      ...clumplets.map(({ tag, value }) => writeWideClumplet(tag, value)),
+    ];
+
+    if (!clumplets.some(({ tag }) => tag === isc_dpb_utf8_filename)) {
+      parts.push(writeWideClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)));
+    }
+
+    parts.push(writeWideStringClumplet(isc_dpb_auth_plugin_name, this.currentPluginName));
+    parts.push(
+      writeWideStringClumplet(isc_dpb_auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
+    );
+    parts.push(writeWideClumplet(isc_dpb_specific_auth_data, attachAuthData));
+    return Buffer.concat(parts);
+  }
+
   private normalizeLogin(login: string): string {
     if (login.length > 2 && login.startsWith('"') && login.endsWith('"')) {
       let normalized = login.slice(1, -1);
@@ -458,6 +414,50 @@ export class WireProtocol {
 
   private buildConnectPluginList(): string {
     return AUTH_PLUGINS.join(',');
+  }
+
+  private readDpbClumplets(dpb: Buffer): DpbClumplet[] {
+    if (dpb.length === 0) {
+      throw new Error('DPB must not be empty.');
+    }
+
+    const version = dpb[0];
+    if (version !== isc_dpb_version1 && version !== isc_dpb_version2) {
+      throw new Error(`Unsupported DPB version ${version}.`);
+    }
+
+    const clumplets: DpbClumplet[] = [];
+    let offset = 1;
+
+    while (offset < dpb.length) {
+      const tag = dpb[offset++];
+      let valueLength: number;
+
+      if (version === isc_dpb_version1) {
+        if (offset >= dpb.length) {
+          throw new Error('Invalid DPB: missing traditional clumplet length.');
+        }
+        valueLength = dpb[offset++];
+      } else {
+        if (offset + 4 > dpb.length) {
+          throw new Error('Invalid DPB: missing wide clumplet length.');
+        }
+        valueLength = dpb.readUInt32LE(offset);
+        offset += 4;
+      }
+
+      if (offset + valueLength > dpb.length) {
+        throw new Error(`Invalid DPB: clumplet ${tag} overruns the buffer.`);
+      }
+
+      clumplets.push({
+        tag,
+        value: dpb.subarray(offset, offset + valueLength),
+      });
+      offset += valueLength;
+    }
+
+    return clumplets;
   }
 
   private writeMultiPartConnectParameter(parameterType: number, value: Buffer): Buffer {
