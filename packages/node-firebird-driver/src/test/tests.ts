@@ -13,6 +13,15 @@ import * as fs from 'fs-extra-promise';
 import { ensureDriverTestTmpDir, getDriverTestDatabaseUri, loadDriverTestConfig } from './test-config';
 
 export function runCommonTests(client: Client) {
+  async function getServerMajorVersion(attachment: any, transaction: any): Promise<number> {
+    const [engineVersion] = await attachment.executeSingleton(
+      transaction,
+      "select rdb$get_context('SYSTEM', 'ENGINE_VERSION') from rdb$database",
+    );
+
+    return parseInt(String(engineVersion), 10);
+  }
+
   function dateToString(d: Date) {
     return d && `${(d.getFullYear() + '').padStart(4, '0')}-${d.getMonth() + 1}-${d.getDate()}`;
   }
@@ -629,7 +638,11 @@ export function runCommonTests(client: Client) {
         expect(statement2.hasResultSet).toBe(false);
         await statement2.dispose();
 
-        const statement3 = await attachment.prepare(transaction, 'insert into t1 values (1) returning *');
+        const serverMajorVersion = await getServerMajorVersion(attachment, transaction);
+        const statement3 = await attachment.prepare(
+          transaction,
+          serverMajorVersion >= 4 ? 'insert into t1 values (1) returning *' : 'insert into t1 values (1) returning n1',
+        );
         expect(statement3.hasResultSet).toBe(false);
         await statement3.dispose();
 
@@ -662,6 +675,7 @@ export function runCommonTests(client: Client) {
         const attachment = await client.createDatabase(getDriverTestDatabaseUri(testConfig, 'ResultSet-fetch.fdb'));
 
         let transaction = await attachment.startTransaction();
+        const serverMajorVersion = await getServerMajorVersion(attachment, transaction);
 
         const blobBuffer = Buffer.alloc(11, '12345678á9');
 
@@ -679,14 +693,18 @@ export function runCommonTests(client: Client) {
             type: 'numeric(15, 2)',
             valToStr: (v: any) => v,
           },
-          { name: 'x_int128', type: 'int128', valToStr: (v: any) => v },
-          {
-            name: 'x_int128_scale',
-            type: 'numeric(20, 2)',
-            valToStr: (v: any) => v,
-          },
-          { name: 'x_dec16', type: 'decfloat(16)', valToStr: (v: any) => v },
-          { name: 'x_dec34', type: 'decfloat(34)', valToStr: (v: any) => v },
+          ...(serverMajorVersion >= 4
+            ? ([
+                { name: 'x_int128', type: 'int128', valToStr: (v: any) => v },
+                {
+                  name: 'x_int128_scale',
+                  type: 'numeric(20, 2)',
+                  valToStr: (v: any) => v,
+                },
+                { name: 'x_dec16', type: 'decfloat(16)', valToStr: (v: any) => v },
+                { name: 'x_dec34', type: 'decfloat(34)', valToStr: (v: any) => v },
+              ] as { name: string; type: string; valToStr: (v: any) => any }[])
+            : []),
           {
             name: 'x_double',
             type: 'double precision',
@@ -712,18 +730,22 @@ export function runCommonTests(client: Client) {
             type: 'time',
             valToStr: (v: any) => `time '${timeToString(v)}'`,
           },
-          {
-            name: 'x_time_tz1',
-            type: 'time with time zone',
-            valToStr: (v: ZonedDate) =>
-              `${timeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
-          },
-          {
-            name: 'x_time_tz2',
-            type: 'time with time zone',
-            valToStr: (v: ZonedDate) =>
-              `${timeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
-          },
+          ...(serverMajorVersion >= 4
+            ? ([
+                {
+                  name: 'x_time_tz1',
+                  type: 'time with time zone',
+                  valToStr: (v: ZonedDate) =>
+                    `${timeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
+                },
+                {
+                  name: 'x_time_tz2',
+                  type: 'time with time zone',
+                  valToStr: (v: ZonedDate) =>
+                    `${timeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
+                },
+              ] as { name: string; type: string; valToStr: (v: any) => any }[])
+            : []),
           {
             name: 'x_timestamp1',
             type: 'timestamp',
@@ -739,18 +761,22 @@ export function runCommonTests(client: Client) {
             type: 'timestamp',
             valToStr: (v: any) => `timestamp '${dateTimeToString(v)}'`,
           },
-          {
-            name: 'x_timestamp_tz1',
-            type: 'timestamp with time zone',
-            valToStr: (v: ZonedDate) =>
-              `${dateTimeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
-          },
-          {
-            name: 'x_timestamp_tz2',
-            type: 'timestamp with time zone',
-            valToStr: (v: ZonedDate) =>
-              `${dateTimeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
-          },
+          ...(serverMajorVersion >= 4
+            ? ([
+                {
+                  name: 'x_timestamp_tz1',
+                  type: 'timestamp with time zone',
+                  valToStr: (v: ZonedDate) =>
+                    `${dateTimeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
+                },
+                {
+                  name: 'x_timestamp_tz2',
+                  type: 'timestamp with time zone',
+                  valToStr: (v: ZonedDate) =>
+                    `${dateTimeTzToString({ date: v.date, timeZone: 'GMT', offset: 0 })} at time zone '${v.timeZone}'`,
+                },
+              ] as { name: string; type: string; valToStr: (v: any) => any }[])
+            : []),
           { name: 'x_boolean', type: 'boolean', valToStr: (v: any) => v },
           {
             name: 'x_varchar',
@@ -809,34 +835,46 @@ export function runCommonTests(client: Client) {
             -3.45,
             -2,
             -3.45,
-            '-45699999999999999999999999999999999876',
-            '-45699999999999999999999999999999999.87',
-            '-456999999999876',
-            '-456999999999999999999999999999.87',
+            ...(serverMajorVersion >= 4
+              ? [
+                  '-45699999999999999999999999999999999876',
+                  '-45699999999999999999999999999999999.87',
+                  '-456999999999876',
+                  '-456999999999999999999999999999.87',
+                ]
+              : []),
             -4.567,
             new Date(2017, 3 - 1, 26),
             new Date(new Date(2000, 3 - 1, 26).setFullYear(50)),
             new Date(9999, 3 - 1, 26),
             new Date(2020, 1 - 1, 1, 11, 56, 32, 123),
-            {
-              date: new Date(Date.UTC(2020, 1 - 1, 1, 11, 56, 32, 123)),
-              timeZone: 'America/New_York',
-            } as ZonedDate,
-            {
-              date: new Date(Date.UTC(2020, 1 - 1, 1, 11, 56, 32, 123)),
-              timeZone: 'America/Sao_Paulo',
-            } as ZonedDate,
+            ...(serverMajorVersion >= 4
+              ? [
+                  {
+                    date: new Date(Date.UTC(2020, 1 - 1, 1, 11, 56, 32, 123)),
+                    timeZone: 'America/New_York',
+                  } as ZonedDate,
+                  {
+                    date: new Date(Date.UTC(2020, 1 - 1, 1, 11, 56, 32, 123)),
+                    timeZone: 'America/Sao_Paulo',
+                  } as ZonedDate,
+                ]
+              : []),
             new Date(2017, 3 - 1, 26, 11, 56, 32, 123),
             new Date(new Date(2000, 3 - 1, 26, 11, 56, 32, 123).setFullYear(50)),
             new Date(9999, 3 - 1, 26, 11, 56, 32, 123),
-            {
-              date: new Date(Date.UTC(2021, 6 - 1, 7, 11, 56, 32, 123)),
-              timeZone: 'America/New_York',
-            } as ZonedDate,
-            {
-              date: new Date(Date.UTC(2021, 6 - 1, 7, 11, 56, 32, 123)),
-              timeZone: 'America/Sao_Paulo',
-            } as ZonedDate,
+            ...(serverMajorVersion >= 4
+              ? [
+                  {
+                    date: new Date(Date.UTC(2021, 6 - 1, 7, 11, 56, 32, 123)),
+                    timeZone: 'America/New_York',
+                  } as ZonedDate,
+                  {
+                    date: new Date(Date.UTC(2021, 6 - 1, 7, 11, 56, 32, 123)),
+                    timeZone: 'America/Sao_Paulo',
+                  } as ZonedDate,
+                ]
+              : []),
             true,
             '123áé4567',
             '123áé4567',
@@ -868,39 +906,35 @@ export function runCommonTests(client: Client) {
 
         const statement3 = await attachment.prepare(
           transaction,
-          `select x_short,
-							x_int,
-							x_int_scale,
-							x_bigint,
-							x_bigint_scale,
-							x_int128,
-							x_int128_scale,
-							x_dec16,
-							x_dec34,
-							x_double,
-							x_date1,
-							x_date2,
-							x_date3,
-							x_time,
-							x_time_tz1,
-							x_time_tz2,
-							x_timestamp1,
-							x_timestamp2,
-							x_timestamp3,
-							x_timestamp_tz1,
-							x_timestamp_tz2,
-							x_boolean,
-							x_varchar,
-							char_length(x_varchar),
-							octet_length(x_varchar),
-							x_char,
-							char_length(x_char),
-							octet_length(x_char),
-							null,
-							x_char || null,
-							x_blob1,
-							x_blob2
-					from t1`,
+          `select ${[
+            'x_short',
+            'x_int',
+            'x_int_scale',
+            'x_bigint',
+            'x_bigint_scale',
+            ...(serverMajorVersion >= 4 ? ['x_int128', 'x_int128_scale', 'x_dec16', 'x_dec34'] : []),
+            'x_double',
+            'x_date1',
+            'x_date2',
+            'x_date3',
+            'x_time',
+            ...(serverMajorVersion >= 4 ? ['x_time_tz1', 'x_time_tz2'] : []),
+            'x_timestamp1',
+            'x_timestamp2',
+            'x_timestamp3',
+            ...(serverMajorVersion >= 4 ? ['x_timestamp_tz1', 'x_timestamp_tz2'] : []),
+            'x_boolean',
+            'x_varchar',
+            'char_length(x_varchar)',
+            'octet_length(x_varchar)',
+            'x_char',
+            'char_length(x_char)',
+            'octet_length(x_char)',
+            'null',
+            'x_char || null',
+            'x_blob1',
+            'x_blob2',
+          ].join(',\n\t\t\t\t\t\t\t')}\n\t\t\t\t\tfrom t1`,
         );
         const resultSet3 = await statement3.executeQuery(transaction);
 
@@ -914,22 +948,28 @@ export function runCommonTests(client: Client) {
           expect(columns[n++]).toBe(-3.45);
           expect(columns[n++]).toBe(-2);
           expect(columns[n++]).toBe(-3.45);
-          expect(columns[n++]).toBe('-45699999999999999999999999999999999876');
-          expect(columns[n++]).toBe('-45699999999999999999999999999999999.87');
-          expect(columns[n++]).toBe('-456999999999876');
-          expect(columns[n++]).toBe('-456999999999999999999999999999.87');
+          if (serverMajorVersion >= 4) {
+            expect(columns[n++]).toBe('-45699999999999999999999999999999999876');
+            expect(columns[n++]).toBe('-45699999999999999999999999999999999.87');
+            expect(columns[n++]).toBe('-456999999999876');
+            expect(columns[n++]).toBe('-456999999999999999999999999999.87');
+          }
           expect(columns[n++]).toBe(-4.567);
           expect(dateTimeToString(columns[n++])).toBe('2017-3-26 0:0:0.0');
           expect(dateTimeToString(columns[n++])).toBe('0050-3-26 0:0:0.0');
           expect(dateTimeToString(columns[n++])).toBe('9999-3-26 0:0:0.0');
           expect(timeToString(columns[n++])).toBe('11:56:32.123');
-          expect(timeTzToString(columns[n++])).toBe(`time '6:56:32.123 America/New_York'`);
-          expect(timeTzToString(columns[n++])).toBe(`time '8:56:32.123 America/Sao_Paulo'`);
+          if (serverMajorVersion >= 4) {
+            expect(timeTzToString(columns[n++])).toBe(`time '6:56:32.123 America/New_York'`);
+            expect(timeTzToString(columns[n++])).toBe(`time '8:56:32.123 America/Sao_Paulo'`);
+          }
           expect(dateTimeToString(columns[n++])).toBe('2017-3-26 11:56:32.123');
           expect(dateTimeToString(columns[n++])).toBe('0050-3-26 11:56:32.123');
           expect(dateTimeToString(columns[n++])).toBe('9999-3-26 11:56:32.123');
-          expect(dateTimeTzToString(columns[n++])).toBe(`timestamp '2021-6-7 7:56:32.123 America/New_York'`);
-          expect(dateTimeTzToString(columns[n++])).toBe(`timestamp '2021-6-7 8:56:32.123 America/Sao_Paulo'`);
+          if (serverMajorVersion >= 4) {
+            expect(dateTimeTzToString(columns[n++])).toBe(`timestamp '2021-6-7 7:56:32.123 America/New_York'`);
+            expect(dateTimeTzToString(columns[n++])).toBe(`timestamp '2021-6-7 8:56:32.123 America/Sao_Paulo'`);
+          }
           expect(columns[n++]).toBe(true);
           expect(columns[n++]).toBe('123áé4567');
           expect(columns[n++]).toBe(9);
