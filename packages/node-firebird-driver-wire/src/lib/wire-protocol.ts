@@ -92,6 +92,8 @@ const STATEMENT_BIND_INFO_ITEMS = Buffer.from([
   statementInfo.sqlDescribeEnd,
 ]);
 const INFO_BUFFER_LENGTH = 32767;
+const BLOB_SEEK_RELATIVE = 1;
+const BLOB_SEEK_FROM_END = 2;
 
 export class WireProtocol {
   private socket?: Socket;
@@ -112,6 +114,8 @@ export class WireProtocol {
   private readonly exhaustedCursors = new Set<number>();
   private readonly eventSubscriptions = new Map<number, EventSubscription>();
   private readonly inlineBlobs = new Map<string, InlineBlobResponse>();
+  private readonly blobPositions = new Map<number, number>();
+  private readonly blobSeekStates = new Map<number, { data: Buffer; position: number }>();
   private nextEventId = 1;
 
   constructor(private readonly options: WireProtocolOptions) {}
@@ -344,6 +348,11 @@ export class WireProtocol {
 
   async getSegment(blob: BlobHandle, bufferLength: number): Promise<BlobSegmentResponse> {
     return await this.runMainChannelTask(async () => {
+      const localBlobState = this.blobSeekStates.get(blob.handle);
+      if (localBlobState) {
+        return this.readLocalBlobSegment(blob, localBlobState, bufferLength);
+      }
+
       if (!this.channel || this.attachmentHandle == undefined) {
         throw new Error('A database must be attached before reading a blob segment.');
       }
@@ -362,6 +371,7 @@ export class WireProtocol {
 
       const response = await this.readResponse();
       assertSuccessfulResponse(response.status, 'Firebird get blob segment failed');
+      this.blobPositions.set(blob.handle, (this.blobPositions.get(blob.handle) ?? 0) + this.getPackedBlobLength(response.data));
       return {
         state: response.handle,
         data: response.data,
@@ -389,11 +399,23 @@ export class WireProtocol {
 
       const response = await this.readResponse();
       assertSuccessfulResponse(response.status, 'Firebird put blob segment failed');
+      this.blobPositions.set(blob.handle, (this.blobPositions.get(blob.handle) ?? 0) + segment.length);
     });
   }
 
   async seekBlob(blob: BlobHandle, mode: number, offset: number): Promise<number> {
     return await this.runMainChannelTask(async () => {
+      const localBlobState = this.blobSeekStates.get(blob.handle);
+      if (localBlobState) {
+        const currentPosition = localBlobState.position;
+        const basePosition =
+          mode === BLOB_SEEK_RELATIVE ? currentPosition : mode === BLOB_SEEK_FROM_END ? localBlobState.data.length : 0;
+        const position = Math.max(0, Math.min(localBlobState.data.length, basePosition + offset));
+        localBlobState.position = position;
+        this.blobPositions.set(blob.handle, position);
+        return position;
+      }
+
       if (!this.channel || this.attachmentHandle == undefined) {
         throw new Error('A database must be attached before seeking a blob.');
       }
@@ -403,6 +425,9 @@ export class WireProtocol {
       writer.writeInt32(blob.handle);
       writer.writeInt32(mode);
       writer.writeInt32(offset);
+      if (this.acceptedPacketType === wirePacketType.lazySend) {
+        writer.writeInt32(wireOp.ping);
+      }
       await this.channel.write(writer.toBuffer());
 
       const operation = await this.readOperation();
@@ -412,7 +437,18 @@ export class WireProtocol {
 
       const response = await this.readResponse();
       assertSuccessfulResponse(response.status, 'Firebird seek blob failed');
-      return response.handle !== 0 ? response.handle : response.quad.readInt32BE(4);
+      if (this.acceptedPacketType === wirePacketType.lazySend) {
+        const syncOperation = await this.readOperation();
+        if (syncOperation !== wireOp.response) {
+          throw new Error(`Unexpected operation ${syncOperation} while syncing seek blob.`);
+        }
+
+        const syncResponse = await this.readResponse();
+        assertSuccessfulResponse(syncResponse.status, 'Firebird seek blob sync failed');
+      }
+      const position = response.handle !== 0 ? response.handle : response.quad.readInt32BE(4);
+      this.blobPositions.set(blob.handle, position);
+      return position;
     });
   }
 
@@ -1001,10 +1037,20 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
-    return {
+    const blobHandle = {
       handle: response.handle,
       id: Buffer.from(response.quad),
+      transaction,
+      bpb: Buffer.from(bpb),
     };
+
+    if (operationCode === wireOp.openBlob2 && this.isStreamBlobParameterBuffer(bpb)) {
+      const data = await this.readAllBlobSegments(blobHandle);
+      this.blobSeekStates.set(blobHandle.handle, { data, position: 0 });
+      this.blobPositions.set(blobHandle.handle, 0);
+    }
+
+    return blobHandle;
   }
 
   private async finishBlob(operationCode: number, blob: BlobHandle, actionName: string): Promise<void> {
@@ -1015,6 +1061,9 @@ export class WireProtocol {
     const writer = new XdrWriter();
     writer.writeInt32(operationCode);
     writer.writeInt32(blob.handle);
+    if (this.acceptedPacketType === wirePacketType.lazySend) {
+      writer.writeInt32(wireOp.ping);
+    }
     await this.channel.write(writer.toBuffer());
 
     const operation = await this.readOperation();
@@ -1024,6 +1073,133 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, `Firebird ${actionName} failed`);
+    this.blobPositions.delete(blob.handle);
+    this.blobSeekStates.delete(blob.handle);
+
+    if (this.acceptedPacketType === wirePacketType.lazySend) {
+      const syncOperation = await this.readOperation();
+      if (syncOperation !== wireOp.response) {
+        throw new Error(`Unexpected operation ${syncOperation} while syncing ${actionName}.`);
+      }
+
+      const syncResponse = await this.readResponse();
+      assertSuccessfulResponse(syncResponse.status, `Firebird ${actionName} sync failed`);
+    }
+  }
+
+  private readLocalBlobSegment(
+    blob: BlobHandle,
+    localBlobState: { data: Buffer; position: number },
+    bufferLength: number,
+  ): BlobSegmentResponse {
+    const maxSegmentLength = Math.max(0, bufferLength - 2);
+    const remainingLength = localBlobState.data.length - localBlobState.position;
+
+    if (remainingLength <= 0 || maxSegmentLength <= 0) {
+      return {
+        state: 2,
+        data: Buffer.alloc(0),
+      };
+    }
+
+    const segmentLength = Math.min(remainingLength, maxSegmentLength);
+    const packedSegment = Buffer.alloc(2 + segmentLength);
+    packedSegment.writeUInt16LE(segmentLength, 0);
+    localBlobState.data.copy(packedSegment, 2, localBlobState.position, localBlobState.position + segmentLength);
+    localBlobState.position += segmentLength;
+    this.blobPositions.set(blob.handle, localBlobState.position);
+
+    return {
+      state: localBlobState.position >= localBlobState.data.length ? 2 : 0,
+      data: packedSegment,
+    };
+  }
+
+  private async readAllBlobSegments(blob: BlobHandle): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+
+    while (true) {
+      const response = await this.getRemoteBlobSegment(blob, INFO_BUFFER_LENGTH);
+      const segmentLength = this.getPackedBlobLength(response.data);
+
+      if (segmentLength > 0) {
+        chunks.push(...this.unpackPackedBlobSegments(response.data));
+      }
+
+      if (response.handle === 2 || segmentLength === 0) {
+        break;
+      }
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  private async getRemoteBlobSegment(blob: BlobHandle, bufferLength: number): Promise<ResponseMessage> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error('A database must be attached before reading a blob segment.');
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(wireOp.getSegment);
+    writer.writeInt32(blob.handle);
+    writer.writeInt32(bufferLength);
+    writer.writeBuffer(Buffer.alloc(0));
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== wireOp.response) {
+      throw new Error(`Unexpected operation ${operation} while getting a blob segment.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird get blob segment failed');
+    return response;
+  }
+
+  private unpackPackedBlobSegments(buffer: Buffer): Buffer[] {
+    const segments: Buffer[] = [];
+    let offset = 0;
+
+    while (offset + 2 <= buffer.length) {
+      const length = buffer.readUInt16LE(offset);
+      offset += 2;
+
+      if (offset + length > buffer.length) {
+        throw new Error('Invalid packed blob segment buffer.');
+      }
+
+      segments.push(Buffer.from(buffer.subarray(offset, offset + length)));
+      offset += length;
+    }
+
+    if (offset !== buffer.length) {
+      throw new Error('Packed blob segment buffer has trailing bytes.');
+    }
+
+    return segments;
+  }
+
+  private getPackedBlobLength(buffer: Buffer): number {
+    return this.unpackPackedBlobSegments(buffer).reduce((totalLength, segment) => totalLength + segment.length, 0);
+  }
+
+  private isStreamBlobParameterBuffer(bpb: Uint8Array): boolean {
+    for (let offset = 1; offset + 1 < bpb.length; ) {
+      const item = bpb[offset++];
+      const length = bpb[offset++];
+
+      if (offset + length > bpb.length) {
+        break;
+      }
+
+      if (item === 3 && length === 1 && bpb[offset] === 1) {
+        return true;
+      }
+
+      offset += length;
+    }
+
+    return false;
   }
 
   private async executePreparedStatement(

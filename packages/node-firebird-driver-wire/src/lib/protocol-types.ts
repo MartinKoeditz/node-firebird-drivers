@@ -23,6 +23,8 @@ export interface StatementHandle {
 export interface BlobHandle {
   readonly handle: number;
   readonly id: Buffer;
+  readonly transaction: TransactionHandle;
+  readonly bpb: Buffer;
 }
 
 export interface BlobSegmentResponse {
