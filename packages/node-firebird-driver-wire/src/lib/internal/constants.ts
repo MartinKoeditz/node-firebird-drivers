@@ -83,21 +83,6 @@ export const WIRE_CRYPT_ENABLED = 1;
 
 export const P_REQ_async = 1;
 
-export const EPB_version1 = 1;
-
-export const isc_dpb_version1 = 1;
-export const isc_dpb_version2 = 2;
-export const isc_dpb_page_size = 4;
-export const isc_dpb_user_name = 28;
-export const isc_dpb_lc_ctype = 48;
-export const isc_dpb_overwrite = 54;
-export const isc_dpb_sql_dialect = 63;
-export const isc_dpb_dummy_packet_interval = 58;
-export const isc_dpb_utf8_filename = 77;
-export const isc_dpb_specific_auth_data = 84;
-export const isc_dpb_auth_plugin_list = 85;
-export const isc_dpb_auth_plugin_name = 86;
-
 export const isc_arg_end = 0;
 export const isc_arg_gds = 1;
 export const isc_arg_string = 2;
@@ -106,52 +91,8 @@ export const isc_arg_number = 4;
 export const isc_arg_interpreted = 5;
 export const isc_arg_warning = 18;
 
-export const isc_info_sql_select = 4;
-export const isc_info_sql_bind = 5;
-export const isc_info_sql_describe_vars = 7;
-export const isc_info_sql_describe_end = 8;
-export const isc_info_sql_sqlda_seq = 9;
-export const isc_info_sql_type = 11;
-export const isc_info_sql_sub_type = 12;
-export const isc_info_sql_scale = 13;
-export const isc_info_sql_length = 14;
-export const isc_info_sql_field = 16;
-export const isc_info_sql_relation = 17;
-export const isc_info_sql_owner = 18;
-export const isc_info_sql_alias = 19;
-export const isc_info_sql_stmt_type = 21;
-export const isc_info_sql_relation_alias = 25;
-export const isc_info_sql_stmt_flags = 27;
-export const isc_info_sql_exec_path_blr_text = 32;
-export const isc_info_end = 1;
-export const isc_info_truncated = 2;
-
-export const isc_info_sql_stmt_select = 1;
-export const isc_info_sql_stmt_select_for_upd = 12;
-
 export const DSQL_drop = 2;
 export const DSQL_close = 1;
-
-export const SQL_TEXT = 452;
-export const SQL_VARYING = 448;
-export const SQL_SHORT = 500;
-export const SQL_LONG = 496;
-export const SQL_FLOAT = 482;
-export const SQL_DOUBLE = 480;
-export const SQL_TIMESTAMP = 510;
-export const SQL_BLOB = 520;
-export const SQL_TYPE_TIME = 560;
-export const SQL_TYPE_DATE = 570;
-export const SQL_INT64 = 580;
-export const SQL_TIMESTAMP_TZ_EX = 32748;
-export const SQL_TIME_TZ_EX = 32750;
-export const SQL_INT128 = 32752;
-export const SQL_TIMESTAMP_TZ = 32754;
-export const SQL_TIME_TZ = 32756;
-export const SQL_DEC16 = 32760;
-export const SQL_DEC34 = 32762;
-export const SQL_BOOLEAN = 32764;
-export const SQL_NULL = 32766;
 
 export const blr_text = 14;
 export const blr_short = 7;

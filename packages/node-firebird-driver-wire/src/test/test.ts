@@ -3,16 +3,7 @@ import {
   getDriverTestDatabasePath,
   loadDriverTestConfig,
 } from '../../../node-firebird-driver/src/test/test-config';
-import { createBpb, tpb } from '../../../node-firebird-driver/src/lib/impl/fb-util';
-import {
-  isc_dpb_lc_ctype,
-  isc_dpb_overwrite,
-  isc_dpb_page_size,
-  isc_dpb_sql_dialect,
-  isc_dpb_user_name,
-  isc_dpb_utf8_filename,
-  isc_dpb_version1,
-} from '../lib/internal/constants';
+import { createBpb, dpb, tpb } from '../../../node-firebird-driver/src/lib/impl/fb-util';
 import { legacyHash } from '../lib/internal/auth/legacy-hash';
 import { WireProtocol } from '../lib/internal/wire-protocol';
 import { writeTraditionalClumplet } from '../lib/internal/xdr';
@@ -26,10 +17,10 @@ describe('node-firebird-driver-wire', () => {
 
   function createAttachDpb(): Buffer {
     return Buffer.concat([
-      Buffer.from([isc_dpb_version1]),
-      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(username, 'utf8')),
-      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
-      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
+      Buffer.from([dpb.version1]),
+      writeTraditionalClumplet(dpb.user_name, Buffer.from(username, 'utf8')),
+      writeTraditionalClumplet(dpb.lc_ctype, Buffer.from('UTF8', 'ascii')),
+      writeTraditionalClumplet(dpb.utf8_filename, Buffer.alloc(0)),
     ]);
   }
 
@@ -38,13 +29,13 @@ describe('node-firebird-driver-wire', () => {
     pageSize.writeUInt32LE(4096, 0);
 
     return Buffer.concat([
-      Buffer.from([isc_dpb_version1]),
-      writeTraditionalClumplet(isc_dpb_user_name, Buffer.from(username, 'utf8')),
-      writeTraditionalClumplet(isc_dpb_lc_ctype, Buffer.from('UTF8', 'ascii')),
-      writeTraditionalClumplet(isc_dpb_sql_dialect, Buffer.from([3])),
-      writeTraditionalClumplet(isc_dpb_page_size, pageSize),
-      writeTraditionalClumplet(isc_dpb_overwrite, Buffer.from([overwrite ? 1 : 0])),
-      writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
+      Buffer.from([dpb.version1]),
+      writeTraditionalClumplet(dpb.user_name, Buffer.from(username, 'utf8')),
+      writeTraditionalClumplet(dpb.lc_ctype, Buffer.from('UTF8', 'ascii')),
+      writeTraditionalClumplet(dpb.sql_dialect, Buffer.from([3])),
+      writeTraditionalClumplet(dpb.page_size, pageSize),
+      writeTraditionalClumplet(dpb.overwrite, Buffer.from([overwrite ? 1 : 0])),
+      writeTraditionalClumplet(dpb.utf8_filename, Buffer.alloc(0)),
     ]);
   }
 

@@ -2,6 +2,8 @@ import { Buffer } from 'node:buffer';
 import { connect as connectSocket, Socket } from 'node:net';
 import { endianness, hostname, userInfo } from 'node:os';
 
+import { commonInfo, dpb, epb, sqlTypes, statementInfo } from 'node-firebird-driver/dist/lib/impl';
+
 import { ClientAuthPlugin, createAuthPlugin } from './auth/plugins';
 import {
   arch_generic,
@@ -37,31 +39,6 @@ import {
   CONNECT_VERSION3,
   DSQL_close,
   DSQL_drop,
-  EPB_version1,
-  isc_dpb_auth_plugin_list,
-  isc_dpb_auth_plugin_name,
-  isc_dpb_specific_auth_data,
-  isc_dpb_utf8_filename,
-  isc_dpb_version1,
-  isc_dpb_version2,
-  isc_info_end,
-  isc_info_sql_alias,
-  isc_info_sql_bind,
-  isc_info_sql_describe_end,
-  isc_info_sql_describe_vars,
-  isc_info_sql_field,
-  isc_info_sql_length,
-  isc_info_sql_owner,
-  isc_info_sql_relation,
-  isc_info_sql_relation_alias,
-  isc_info_sql_scale,
-  isc_info_sql_select,
-  isc_info_sql_sqlda_seq,
-  isc_info_sql_stmt_flags,
-  isc_info_sql_stmt_type,
-  isc_info_sql_sub_type,
-  isc_info_sql_type,
-  isc_info_truncated,
   op_accept,
   op_accept_data,
   op_allocate_statement,
@@ -106,26 +83,6 @@ import {
   op_transaction,
   P_REQ_async,
   ptype_batch_send,
-  SQL_BLOB,
-  SQL_BOOLEAN,
-  SQL_DEC16,
-  SQL_DEC34,
-  SQL_DOUBLE,
-  SQL_FLOAT,
-  SQL_INT128,
-  SQL_INT64,
-  SQL_LONG,
-  SQL_NULL,
-  SQL_SHORT,
-  SQL_TEXT,
-  SQL_TIME_TZ,
-  SQL_TIME_TZ_EX,
-  SQL_TIMESTAMP,
-  SQL_TIMESTAMP_TZ,
-  SQL_TIMESTAMP_TZ_EX,
-  SQL_TYPE_DATE,
-  SQL_TYPE_TIME,
-  SQL_VARYING,
   STATEMENT_FLAG_HAS_CURSOR,
   SUPPORTED_PROTOCOLS,
   WIRE_CRYPT_ENABLED,
@@ -254,31 +211,31 @@ interface EventSubscription {
 const LITTLE_ENDIAN = endianness() === 'LE';
 const FETCH_NO_DATA = 100;
 
-const STATEMENT_BASE_INFO_ITEMS = Buffer.from([isc_info_sql_stmt_type, isc_info_sql_stmt_flags]);
+const STATEMENT_BASE_INFO_ITEMS = Buffer.from([statementInfo.sqlStmtType, statementInfo.sqlStmtFlags]);
 const STATEMENT_SELECT_INFO_ITEMS = Buffer.from([
-  isc_info_sql_select,
-  isc_info_sql_describe_vars,
-  isc_info_sql_sqlda_seq,
-  isc_info_sql_type,
-  isc_info_sql_sub_type,
-  isc_info_sql_scale,
-  isc_info_sql_length,
-  isc_info_sql_field,
-  isc_info_sql_alias,
-  isc_info_sql_relation,
-  isc_info_sql_relation_alias,
-  isc_info_sql_owner,
-  isc_info_sql_describe_end,
+  statementInfo.sqlSelect,
+  statementInfo.sqlDescribeVars,
+  statementInfo.sqlSqldaSeq,
+  statementInfo.sqlType,
+  statementInfo.sqlSubType,
+  statementInfo.sqlScale,
+  statementInfo.sqlLength,
+  statementInfo.sqlField,
+  statementInfo.sqlAlias,
+  statementInfo.sqlRelation,
+  statementInfo.sqlRelationAlias,
+  statementInfo.sqlOwner,
+  statementInfo.sqlDescribeEnd,
 ]);
 const STATEMENT_BIND_INFO_ITEMS = Buffer.from([
-  isc_info_sql_bind,
-  isc_info_sql_describe_vars,
-  isc_info_sql_sqlda_seq,
-  isc_info_sql_type,
-  isc_info_sql_sub_type,
-  isc_info_sql_scale,
-  isc_info_sql_length,
-  isc_info_sql_describe_end,
+  statementInfo.sqlBind,
+  statementInfo.sqlDescribeVars,
+  statementInfo.sqlSqldaSeq,
+  statementInfo.sqlType,
+  statementInfo.sqlSubType,
+  statementInfo.sqlScale,
+  statementInfo.sqlLength,
+  statementInfo.sqlDescribeEnd,
 ]);
 const INFO_BUFFER_LENGTH = 32767;
 
@@ -1295,7 +1252,7 @@ export class WireProtocol {
       buffers
         .filter((buffer) => buffer.length > 0)
         .map((buffer, index) =>
-          index + 1 < buffers.length && buffer[buffer.length - 1] === isc_info_end ? buffer.subarray(0, -1) : buffer,
+          index + 1 < buffers.length && buffer[buffer.length - 1] === commonInfo.end ? buffer.subarray(0, -1) : buffer,
         ),
     );
   }
@@ -1307,23 +1264,23 @@ export class WireProtocol {
 
     const clumplets = this.readDpbClumplets(baseDpb).filter(
       ({ tag }) =>
-        tag !== isc_dpb_auth_plugin_name && tag !== isc_dpb_auth_plugin_list && tag !== isc_dpb_specific_auth_data,
+        tag !== dpb.auth_plugin_name && tag !== dpb.auth_plugin_list && tag !== dpb.specific_auth_data,
     );
 
     const parts = [
-      Buffer.from([isc_dpb_version2]),
+      Buffer.from([dpb.version2]),
       ...clumplets.map(({ tag, value }) => writeWideClumplet(tag, value)),
     ];
 
-    if (!clumplets.some(({ tag }) => tag === isc_dpb_utf8_filename)) {
-      parts.push(writeWideClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)));
+    if (!clumplets.some(({ tag }) => tag === dpb.utf8_filename)) {
+      parts.push(writeWideClumplet(dpb.utf8_filename, Buffer.alloc(0)));
     }
 
-    parts.push(writeWideStringClumplet(isc_dpb_auth_plugin_name, this.currentPluginName));
+    parts.push(writeWideStringClumplet(dpb.auth_plugin_name, this.currentPluginName));
     parts.push(
-      writeWideStringClumplet(isc_dpb_auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
+      writeWideStringClumplet(dpb.auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)),
     );
-    parts.push(writeWideClumplet(isc_dpb_specific_auth_data, attachAuthData));
+    parts.push(writeWideClumplet(dpb.specific_auth_data, attachAuthData));
     return Buffer.concat(parts);
   }
 
@@ -1354,43 +1311,43 @@ export class WireProtocol {
     return AUTH_PLUGINS.join(',');
   }
 
-  private readDpbClumplets(dpb: Buffer): DpbClumplet[] {
-    if (dpb.length === 0) {
+  private readDpbClumplets(buffer: Buffer): DpbClumplet[] {
+    if (buffer.length === 0) {
       throw new Error('DPB must not be empty.');
     }
 
-    const version = dpb[0];
-    if (version !== isc_dpb_version1 && version !== isc_dpb_version2) {
+    const version = buffer[0];
+    if (version !== dpb.version1 && version !== dpb.version2) {
       throw new Error(`Unsupported DPB version ${version}.`);
     }
 
     const clumplets: DpbClumplet[] = [];
     let offset = 1;
 
-    while (offset < dpb.length) {
-      const tag = dpb[offset++];
+    while (offset < buffer.length) {
+      const tag = buffer[offset++];
       let valueLength: number;
 
-      if (version === isc_dpb_version1) {
-        if (offset >= dpb.length) {
+      if (version === dpb.version1) {
+        if (offset >= buffer.length) {
           throw new Error('Invalid DPB: missing traditional clumplet length.');
         }
-        valueLength = dpb[offset++];
+        valueLength = buffer[offset++];
       } else {
-        if (offset + 4 > dpb.length) {
+        if (offset + 4 > buffer.length) {
           throw new Error('Invalid DPB: missing wide clumplet length.');
         }
-        valueLength = dpb.readUInt32LE(offset);
+        valueLength = buffer.readUInt32LE(offset);
         offset += 4;
       }
 
-      if (offset + valueLength > dpb.length) {
+      if (offset + valueLength > buffer.length) {
         throw new Error(`Invalid DPB: clumplet ${tag} overruns the buffer.`);
       }
 
       clumplets.push({
         tag,
-        value: dpb.subarray(offset, offset + valueLength),
+        value: buffer.subarray(offset, offset + valueLength),
       });
       offset += valueLength;
     }
@@ -1414,7 +1371,7 @@ export class WireProtocol {
   }
 
   private buildEventBlock(names: readonly string[]): Buffer {
-    const parts = [Buffer.from([EPB_version1])];
+    const parts = [Buffer.from([epb.version1])];
 
     for (const name of names) {
       const encodedName = Buffer.from(name, 'utf8');
@@ -1655,28 +1612,28 @@ export class WireProtocol {
 
     while (offset < data.length) {
       const item = data[offset++];
-      if (item === isc_info_end) {
+      if (item === commonInfo.end) {
         break;
       }
 
       switch (item) {
-        case isc_info_sql_stmt_type:
+        case statementInfo.sqlStmtType:
           ({ value: statementType, nextOffset: offset } = this.readInfoNumeric(data, offset));
           break;
 
-        case isc_info_sql_stmt_flags:
+        case statementInfo.sqlStmtFlags:
           ({ value: statementFlags, nextOffset: offset } = this.readInfoNumeric(data, offset));
           break;
 
-        case isc_info_sql_select:
+        case statementInfo.sqlSelect:
           outputSection = true;
           break;
 
-        case isc_info_sql_bind:
+        case statementInfo.sqlBind:
           outputSection = false;
           break;
 
-        case isc_info_sql_describe_vars: {
+        case statementInfo.sqlDescribeVars: {
           const describeInfo = this.readInfoNumeric(data, offset);
           offset = describeInfo.nextOffset;
 
@@ -1688,7 +1645,7 @@ export class WireProtocol {
           let remainingVariables = describeInfo.value;
           while (offset < data.length) {
             const describeItem = data[offset++];
-            if (describeItem === isc_info_sql_describe_end) {
+            if (describeItem === statementInfo.sqlDescribeEnd) {
               currentColumn = undefined;
               if (--remainingVariables <= 0) {
                 break;
@@ -1697,17 +1654,17 @@ export class WireProtocol {
             }
 
             if (
-              describeItem === isc_info_end ||
-              describeItem === isc_info_truncated ||
-              describeItem === isc_info_sql_select ||
-              describeItem === isc_info_sql_bind
+              describeItem === commonInfo.end ||
+              describeItem === commonInfo.truncated ||
+              describeItem === statementInfo.sqlSelect ||
+              describeItem === statementInfo.sqlBind
             ) {
               offset--;
               break;
             }
 
             switch (describeItem) {
-              case isc_info_sql_sqlda_seq: {
+              case statementInfo.sqlSqldaSeq: {
                 const sequenceInfo = this.readInfoNumeric(data, offset);
                 const sequence = sequenceInfo.value;
                 offset = sequenceInfo.nextOffset;
@@ -1734,7 +1691,7 @@ export class WireProtocol {
                 break;
               }
 
-              case isc_info_sql_type: {
+              case statementInfo.sqlType: {
                 const typeInfo = this.readInfoNumeric(data, offset);
                 const type = typeInfo.value;
                 offset = typeInfo.nextOffset;
@@ -1746,7 +1703,7 @@ export class WireProtocol {
                 break;
               }
 
-              case isc_info_sql_sub_type:
+              case statementInfo.sqlSubType:
                 if (currentColumn) {
                   const info = this.readInfoNumeric(data, offset);
                   currentColumn.subType = info.value;
@@ -1757,7 +1714,7 @@ export class WireProtocol {
                 }
                 break;
 
-              case isc_info_sql_scale:
+              case statementInfo.sqlScale:
                 if (currentColumn) {
                   const info = this.readInfoNumeric(data, offset);
                   currentColumn.scale = info.value;
@@ -1767,7 +1724,7 @@ export class WireProtocol {
                 }
                 break;
 
-              case isc_info_sql_length:
+              case statementInfo.sqlLength:
                 if (currentColumn) {
                   const info = this.readInfoNumeric(data, offset);
                   currentColumn.length = info.value;
@@ -1777,7 +1734,7 @@ export class WireProtocol {
                 }
                 break;
 
-              case isc_info_sql_field:
+              case statementInfo.sqlField:
                 if (currentColumn) {
                   const info = this.readInfoString(data, offset);
                   currentColumn.field = info.value;
@@ -1787,7 +1744,7 @@ export class WireProtocol {
                 }
                 break;
 
-              case isc_info_sql_relation:
+              case statementInfo.sqlRelation:
                 if (currentColumn) {
                   const info = this.readInfoString(data, offset);
                   currentColumn.relation = info.value;
@@ -1797,7 +1754,7 @@ export class WireProtocol {
                 }
                 break;
 
-              case isc_info_sql_alias:
+              case statementInfo.sqlAlias:
                 if (currentColumn) {
                   const info = this.readInfoString(data, offset);
                   currentColumn.alias = info.value;
@@ -1883,36 +1840,36 @@ export class WireProtocol {
       const normalized = { ...column };
 
       switch (normalized.type) {
-        case SQL_TEXT:
-          normalized.type = SQL_VARYING;
+        case sqlTypes.SQL_TEXT:
+          normalized.type = sqlTypes.SQL_VARYING;
           break;
 
-        case SQL_SHORT:
-        case SQL_LONG:
-        case SQL_INT64:
-        case SQL_FLOAT:
-          normalized.type = SQL_DOUBLE;
+        case sqlTypes.SQL_SHORT:
+        case sqlTypes.SQL_LONG:
+        case sqlTypes.SQL_INT64:
+        case sqlTypes.SQL_FLOAT:
+          normalized.type = sqlTypes.SQL_DOUBLE;
           normalized.subType = 0;
           normalized.scale = 0;
           normalized.length = 8;
           break;
 
-        case SQL_TIME_TZ:
-          normalized.type = SQL_TIME_TZ_EX;
+        case sqlTypes.SQL_TIME_TZ:
+          normalized.type = sqlTypes.SQL_TIME_TZ_EX;
           normalized.subType = 0;
           normalized.length = 8;
           break;
 
-        case SQL_TIMESTAMP_TZ:
-          normalized.type = SQL_TIMESTAMP_TZ_EX;
+        case sqlTypes.SQL_TIMESTAMP_TZ:
+          normalized.type = sqlTypes.SQL_TIMESTAMP_TZ_EX;
           normalized.subType = 0;
           normalized.length = 12;
           break;
 
-        case SQL_INT128:
-        case SQL_DEC16:
-        case SQL_DEC34:
-          normalized.type = SQL_VARYING;
+        case sqlTypes.SQL_INT128:
+        case sqlTypes.SQL_DEC16:
+        case sqlTypes.SQL_DEC34:
+          normalized.type = sqlTypes.SQL_VARYING;
           normalized.subType = 2;
           normalized.charSet = 2;
           normalized.scale = 0;
@@ -1920,7 +1877,7 @@ export class WireProtocol {
           break;
       }
 
-      if (normalized.type !== SQL_TEXT && normalized.type !== SQL_VARYING) {
+      if (normalized.type !== sqlTypes.SQL_TEXT && normalized.type !== sqlTypes.SQL_VARYING) {
         normalized.charSet = 0;
       }
 
@@ -1956,45 +1913,45 @@ export class WireProtocol {
 
   private describeColumnType(column: StatementColumn): { blr: number[]; alignment: number; length: number } {
     switch (column.type) {
-      case SQL_TEXT:
+      case sqlTypes.SQL_TEXT:
         return {
           blr: [blr_text, column.length & 0xff, (column.length >> 8) & 0xff],
           alignment: 1,
           length: column.length,
         };
-      case SQL_VARYING:
+      case sqlTypes.SQL_VARYING:
         return {
           blr: [blr_varying, column.length & 0xff, (column.length >> 8) & 0xff],
           alignment: 2,
           length: column.length + 2,
         };
-      case SQL_SHORT:
+      case sqlTypes.SQL_SHORT:
         return { blr: [blr_short, column.scale & 0xff], alignment: 2, length: 2 };
-      case SQL_LONG:
+      case sqlTypes.SQL_LONG:
         return { blr: [blr_long, column.scale & 0xff], alignment: 4, length: 4 };
-      case SQL_INT64:
+      case sqlTypes.SQL_INT64:
         return { blr: [blr_int64, column.scale & 0xff], alignment: 8, length: 8 };
-      case SQL_DOUBLE:
+      case sqlTypes.SQL_DOUBLE:
         return { blr: [blr_double], alignment: 8, length: 8 };
-      case SQL_TIMESTAMP:
+      case sqlTypes.SQL_TIMESTAMP:
         return { blr: [blr_timestamp], alignment: 4, length: 8 };
-      case SQL_TYPE_DATE:
+      case sqlTypes.SQL_TYPE_DATE:
         return { blr: [blr_sql_date], alignment: 4, length: 4 };
-      case SQL_TYPE_TIME:
+      case sqlTypes.SQL_TYPE_TIME:
         return { blr: [blr_sql_time], alignment: 4, length: 4 };
-      case SQL_TIME_TZ_EX:
+      case sqlTypes.SQL_TIME_TZ_EX:
         return { blr: [blr_ex_time_tz], alignment: 4, length: 8 };
-      case SQL_BOOLEAN:
+      case sqlTypes.SQL_BOOLEAN:
         return { blr: [blr_bool], alignment: 1, length: 1 };
-      case SQL_BLOB:
+      case sqlTypes.SQL_BLOB:
         return {
           blr: [blr_blob2, column.subType & 0xff, (column.subType >> 8) & 0xff, 0, 0],
           alignment: 4,
           length: 8,
         };
-      case SQL_TIMESTAMP_TZ_EX:
+      case sqlTypes.SQL_TIMESTAMP_TZ_EX:
         return { blr: [blr_ex_timestamp_tz], alignment: 4, length: 12 };
-      case SQL_NULL:
+      case sqlTypes.SQL_NULL:
         return { blr: [blr_null], alignment: 1, length: 0 };
       default:
         throw new Error(`Unsupported Firebird column type ${column.type} for cursor fetch.`);
@@ -2016,13 +1973,13 @@ export class WireProtocol {
       }
 
       switch (column.type) {
-        case SQL_TEXT: {
+        case sqlTypes.SQL_TEXT: {
           const value = await this.readPaddedOpaque(column.length);
           value.copy(rowBuffer, column.offset);
           break;
         }
 
-        case SQL_VARYING: {
+        case sqlTypes.SQL_VARYING: {
           const valueLength = await this.readXdrInt32();
           const value = await this.readPaddedOpaque(valueLength);
           view.setUint16(column.offset, valueLength, LITTLE_ENDIAN);
@@ -2030,48 +1987,48 @@ export class WireProtocol {
           break;
         }
 
-        case SQL_TYPE_DATE:
-        case SQL_TYPE_TIME:
+        case sqlTypes.SQL_TYPE_DATE:
+        case sqlTypes.SQL_TYPE_TIME:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
-        case SQL_TIME_TZ_EX:
+        case sqlTypes.SQL_TIME_TZ_EX:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           view.setUint16(column.offset + 4, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
           view.setInt16(column.offset + 6, this.decodeTimeZoneOffset(await this.readXdrInt32()), LITTLE_ENDIAN);
           break;
 
-        case SQL_DOUBLE: {
+        case sqlTypes.SQL_DOUBLE: {
           const value = await this.channel!.readExactly(8);
           view.setFloat64(column.offset, value.readDoubleBE(0), LITTLE_ENDIAN);
           break;
         }
 
-        case SQL_TIMESTAMP:
+        case sqlTypes.SQL_TIMESTAMP:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
-        case SQL_TIMESTAMP_TZ_EX:
+        case sqlTypes.SQL_TIMESTAMP_TZ_EX:
           view.setInt32(column.offset, await this.readXdrInt32(), LITTLE_ENDIAN);
           view.setInt32(column.offset + 4, await this.readXdrInt32(), LITTLE_ENDIAN);
           view.setUint16(column.offset + 8, this.decodeTimeZoneValue(await this.readXdrInt32()), LITTLE_ENDIAN);
           view.setInt16(column.offset + 10, await this.readXdrInt32(), LITTLE_ENDIAN);
           break;
 
-        case SQL_BOOLEAN: {
+        case sqlTypes.SQL_BOOLEAN: {
           const value = await this.readPaddedOpaque(1);
           rowBuffer[column.offset] = value[0] ?? 0;
           break;
         }
 
-        case SQL_BLOB: {
+        case sqlTypes.SQL_BLOB: {
           const value = await this.channel!.readExactly(8);
           value.copy(rowBuffer, column.offset);
           break;
         }
 
-        case SQL_NULL:
+        case sqlTypes.SQL_NULL:
           break;
 
         default:
@@ -2162,7 +2119,7 @@ export class WireProtocol {
 
       const column = columns[index];
       switch (column.type) {
-        case SQL_VARYING: {
+        case sqlTypes.SQL_VARYING: {
           const valueLength = view.getUint16(column.offset, LITTLE_ENDIAN);
           writer.writeInt32(valueLength);
           writer.writeBytes(source.subarray(column.offset + 2, column.offset + 2 + valueLength));
@@ -2170,46 +2127,46 @@ export class WireProtocol {
           break;
         }
 
-        case SQL_DOUBLE: {
+        case sqlTypes.SQL_DOUBLE: {
           const buffer = Buffer.alloc(8);
           buffer.writeDoubleBE(view.getFloat64(column.offset, LITTLE_ENDIAN), 0);
           writer.writeBytes(buffer);
           break;
         }
 
-        case SQL_TYPE_DATE:
-        case SQL_TYPE_TIME:
+        case sqlTypes.SQL_TYPE_DATE:
+        case sqlTypes.SQL_TYPE_TIME:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
           break;
 
-        case SQL_TIME_TZ_EX:
+        case sqlTypes.SQL_TIME_TZ_EX:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
           writer.writeInt32(view.getUint16(column.offset + 4, LITTLE_ENDIAN));
           writer.writeInt32(this.encodeTimeZoneOffset(view.getInt16(column.offset + 6, LITTLE_ENDIAN)));
           break;
 
-        case SQL_TIMESTAMP:
+        case sqlTypes.SQL_TIMESTAMP:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
           writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
           break;
 
-        case SQL_TIMESTAMP_TZ_EX:
+        case sqlTypes.SQL_TIMESTAMP_TZ_EX:
           writer.writeInt32(view.getInt32(column.offset, LITTLE_ENDIAN));
           writer.writeInt32(view.getInt32(column.offset + 4, LITTLE_ENDIAN));
           writer.writeInt32(view.getUint16(column.offset + 8, LITTLE_ENDIAN));
           writer.writeInt32(view.getInt16(column.offset + 10, LITTLE_ENDIAN));
           break;
 
-        case SQL_BOOLEAN:
+        case sqlTypes.SQL_BOOLEAN:
           writer.writeBytes(Buffer.from([source[column.offset] ?? 0]));
           writer.writeAlignment(1);
           break;
 
-        case SQL_BLOB:
+        case sqlTypes.SQL_BLOB:
           writer.writeBytes(source.subarray(column.offset, column.offset + 8));
           break;
 
-        case SQL_NULL:
+        case sqlTypes.SQL_NULL:
           break;
 
         default:
