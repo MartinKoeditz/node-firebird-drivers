@@ -843,18 +843,32 @@ export class WireProtocol {
 
     if (this.socket) {
       const socket = this.socket;
-      await Promise.race([
-        new Promise<void>((resolve) => {
-          socket.once('close', () => resolve());
-          socket.end();
-        }),
-        new Promise<void>((resolve) =>
-          setTimeout(() => {
-            socket.destroy();
-            resolve();
-          }, this.options.timeoutMs ?? 5000),
-        ),
-      ]).catch(() => undefined);
+      await new Promise<void>((resolve) => {
+        let settled = false;
+
+        const finish = () => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          socket.off('close', onClose);
+          clearTimeout(destroyTimer);
+          resolve();
+        };
+
+        const onClose = () => finish();
+
+        const destroyTimer = setTimeout(() => {
+          socket.destroy();
+          finish();
+        }, this.options.timeoutMs ?? 5000);
+
+        destroyTimer.unref();
+
+        socket.once('close', onClose);
+        socket.end();
+      }).catch(() => undefined);
     }
 
     this.channel = undefined;
