@@ -1,0 +1,121 @@
+import { AttachmentImpl } from './attachment';
+
+import { Blob, BlobSeekWhence, CreateBlobOptions } from 'node-firebird-driver';
+import { AbstractBlobStream, blobInfo, createBpb, getPortableInteger } from 'node-firebird-driver/dist/lib/impl';
+
+import { BlobHandle } from './internal/wire-protocol';
+import { TransactionImpl } from './transaction';
+
+const MAX_SEGMENT_SIZE = 65535;
+const BLOB_LENGTH_INFO_ITEMS = Buffer.from([blobInfo.totalLength]);
+
+function decodePackedBlobSegments(buffer: Buffer): Buffer[] {
+  const segments: Buffer[] = [];
+  let offset = 0;
+
+  while (offset + 2 <= buffer.length) {
+    const length = buffer.readUInt16LE(offset);
+    offset += 2;
+    segments.push(Buffer.from(buffer.subarray(offset, offset + length)));
+    offset += length;
+  }
+
+  return segments;
+}
+
+export class BlobStreamImpl extends AbstractBlobStream {
+  override attachment: AttachmentImpl;
+  blobHandle?: BlobHandle;
+  private readBuffer = Buffer.alloc(0);
+  private eofPending = false;
+  private eofReached = false;
+
+  static async create(
+    attachment: AttachmentImpl,
+    transaction: TransactionImpl,
+    options?: CreateBlobOptions,
+  ): Promise<BlobStreamImpl> {
+    const blobHandle = await attachment.protocol!.createBlob(transaction.transactionHandle!, createBpb(options));
+    const blob = new Blob(attachment, blobHandle.id);
+    const blobStream = new BlobStreamImpl(blob, attachment);
+    blobStream.blobHandle = blobHandle;
+    return blobStream;
+  }
+
+  static async open(attachment: AttachmentImpl, transaction: TransactionImpl, blob: Blob): Promise<BlobStreamImpl> {
+    const blobStream = new BlobStreamImpl(blob, attachment);
+    blobStream.blobHandle = await attachment.protocol!.openBlob(transaction.transactionHandle!, blob.id);
+    return blobStream;
+  }
+
+  protected async internalGetLength(): Promise<number> {
+    const infoRet = await this.attachment.protocol!.getBlobInfo(this.blobHandle!, BLOB_LENGTH_INFO_ITEMS);
+
+    if (infoRet[0] != blobInfo.totalLength) {
+      throw new Error('Unrecognized response from blob info.');
+    }
+
+    const size = getPortableInteger(infoRet.subarray(1), 2);
+    return getPortableInteger(infoRet.subarray(3), size);
+  }
+
+  protected async internalClose(): Promise<void> {
+    await this.attachment.protocol!.closeBlob(this.blobHandle!);
+    this.blobHandle = undefined;
+  }
+
+  protected async internalCancel(): Promise<void> {
+    await this.attachment.protocol!.cancelBlob(this.blobHandle!);
+    this.blobHandle = undefined;
+  }
+
+  protected async internalSeek(offset: number, whence?: BlobSeekWhence): Promise<number> {
+    this.readBuffer = Buffer.alloc(0);
+    this.eofPending = false;
+    this.eofReached = false;
+    return await this.attachment.protocol!.seekBlob(this.blobHandle!, whence ?? BlobSeekWhence.START, offset);
+  }
+
+  protected async internalRead(buffer: Buffer): Promise<number> {
+    if (this.readBuffer.length === 0) {
+      if (this.eofReached) {
+        return -1;
+      }
+
+      const response = await this.attachment.protocol!.getSegment(
+        this.blobHandle!,
+        Math.min(buffer.length, MAX_SEGMENT_SIZE),
+      );
+      this.readBuffer = Buffer.concat(decodePackedBlobSegments(response.data));
+      this.eofPending = response.state === 2;
+
+      if (this.readBuffer.length === 0) {
+        this.eofReached = true;
+        return -1;
+      }
+    }
+
+    const readBytes = Math.min(buffer.length, this.readBuffer.length);
+    this.readBuffer.copy(buffer, 0, 0, readBytes);
+    this.readBuffer = this.readBuffer.subarray(readBytes);
+
+    if (this.readBuffer.length === 0 && this.eofPending) {
+      this.eofReached = true;
+      this.eofPending = false;
+    }
+
+    return readBytes;
+  }
+
+  protected async internalWrite(buffer: Buffer): Promise<void> {
+    while (buffer.length > 0) {
+      const writingBytes = Math.min(buffer.length, MAX_SEGMENT_SIZE);
+      await this.attachment.protocol!.putSegment(this.blobHandle!, buffer.subarray(0, writingBytes));
+      buffer = buffer.subarray(writingBytes);
+    }
+  }
+
+  get isValid(): boolean {
+    return !!this.blobHandle && this.attachment.isValid;
+  }
+}

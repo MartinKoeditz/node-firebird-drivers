@@ -50,10 +50,9 @@
   },
   "dependencies": {
     "@types/node": "^22.13.10",
-    "dotenv": "^17.2.3"
+    "node-firebird-driver": "workspace:^"
   },
   "devDependencies": {
-    "jest": "^30.2.0",
-    "node-firebird-driver": "workspace:^"
+    "jest": "^30.2.0"
   }
 }

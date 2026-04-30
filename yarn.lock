@@ -6692,7 +6692,6 @@ __metadata:
   resolution: "node-firebird-driver-wire@workspace:packages/node-firebird-driver-wire"
   dependencies:
     "@types/node": "npm:^22.13.10"
-    dotenv: "npm:^17.2.3"
     jest: "npm:^30.2.0"
     node-firebird-driver: "workspace:^"
   languageName: unknown
