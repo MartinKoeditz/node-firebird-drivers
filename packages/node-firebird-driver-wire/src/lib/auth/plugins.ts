@@ -18,7 +18,7 @@ class LegacyAuthPlugin implements ClientAuthPlugin {
 
   constructor(
     private readonly password: string,
-    private readonly charset = 'utf8',
+    private readonly charset: BufferEncoding = 'utf8',
   ) {}
 
   get initialData(): Buffer {

@@ -67,6 +67,7 @@ When no host is provided, the driver defaults to `localhost` and port `3050`.
 - Uses the same high-level API exposed by `node-firebird-driver`.
 - Does not depend on `fbclient`, which makes it easier to deploy in environments where native libraries are hard to ship.
 - Connects through the Firebird network protocol, so it is a good choice for remote database access and containerized deployments.
+- Supports Firebird authentication through `Srp256`, `Srp`, and `Legacy_Auth`.
 - If you want the Firebird client library or embedded integration instead, use `node-firebird-driver-native`.
 
 You can also configure socket timeout behavior:

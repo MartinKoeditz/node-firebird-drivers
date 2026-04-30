@@ -99,7 +99,7 @@ export class WireProtocol {
   private eventLoopPromise?: Promise<void>;
   private mainChannelQueue: Promise<void> = Promise.resolve();
   private attachmentHandle?: number;
-  private currentPluginName: AuthPluginName = 'Legacy_Auth';
+  private currentPluginName: AuthPluginName = authPlugin.list[0];
   private currentPlugin?: ClientAuthPlugin;
   private clientAuthListSent = false;
   private wireCryptEnabled = false;

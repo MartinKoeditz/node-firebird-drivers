@@ -1,23 +1,22 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-const SRP_KEY_SIZE = 128;
-const SRP_SALT_SIZE = 32;
-const EXPECTED_AUTH_DATA_LENGTH = (SRP_SALT_SIZE + SRP_KEY_SIZE + 2) * 2;
-const PRIME = BigInt(
+const SRP_MODULUS = BigInt(
   `0xE67D2E994B2F900C3F41F08F5BB2627ED0D49EE1FE767A52EFCD565CD6E768812C3E1E9CE8F0A8BEA6CB13CD29DDEBF7A96D4A93B55D488DF099A15C89DCB0640738EB2CBDD9A8F7BAB561AB1B0DC1C6CDABF303264A08D1BCA932D1F1EE428B619D970F342ABA9A65793B8B2F041AE5364350C16F735F56ECBCA87BD57B29E7`,
 );
-const GENERATOR = 2n;
-const K = BigInt('1277432915985975349439481660349303019122249719989');
+const SRP_GENERATOR = 2n;
+const SRP_MULTIPLIER = BigInt('1277432915985975349439481660349303019122249719989');
+const SRP_FIELD_BYTES = 128;
+const SRP_SALT_BYTES = 32;
+const AUTH_LENGTH_BYTES = 2;
+const MAX_AUTH_PAYLOAD_BYTES = AUTH_LENGTH_BYTES + SRP_SALT_BYTES * 2 + AUTH_LENGTH_BYTES + SRP_FIELD_BYTES * 2;
+const PROOF_PREFIX = createProofPrefix();
 
-function sha1(...parts: Buffer[]): Buffer {
-  const hash = createHash('sha1');
-  for (const part of parts) {
-    hash.update(part);
-  }
-  return hash.digest();
+interface ServerSrpChallenge {
+  readonly salt: Buffer;
+  readonly serverPublicKey: bigint;
 }
 
-function hash(algorithm: string, ...parts: Buffer[]): Buffer {
+function hashBytes(algorithm: string, ...parts: readonly Buffer[]): Buffer {
   const digest = createHash(algorithm.toLowerCase());
 
   for (const part of parts) {
@@ -27,130 +26,158 @@ function hash(algorithm: string, ...parts: Buffer[]): Buffer {
   return digest.digest();
 }
 
+function sha1Bytes(...parts: readonly Buffer[]): Buffer {
+  return hashBytes('sha1', ...parts);
+}
+
+function createProofPrefix(): Buffer {
+  const modulusHash = unsignedBigIntToBuffer(bytesToBigInt(sha1Bytes(unsignedBigIntToBuffer(SRP_MODULUS))));
+  const generatorHash = unsignedBigIntToBuffer(bytesToBigInt(sha1Bytes(unsignedBigIntToBuffer(SRP_GENERATOR))));
+  return unsignedBigIntToBuffer(modPow(bytesToBigInt(modulusHash), bytesToBigInt(generatorHash), SRP_MODULUS));
+}
+
+function normalizeMod(value: bigint, modulus: bigint): bigint {
+  return ((value % modulus) + modulus) % modulus;
+}
+
 function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
   let result = 1n;
-  let currentBase = ((base % modulus) + modulus) % modulus;
-  let currentExponent = exponent;
+  let factor = normalizeMod(base, modulus);
+  let power = exponent;
 
-  while (currentExponent > 0n) {
-    if ((currentExponent & 1n) === 1n) {
-      result = (result * currentBase) % modulus;
+  while (power > 0n) {
+    if ((power & 1n) !== 0n) {
+      result = (result * factor) % modulus;
     }
 
-    currentExponent >>= 1n;
-    currentBase = (currentBase * currentBase) % modulus;
+    power >>= 1n;
+    factor = (factor * factor) % modulus;
   }
 
   return result;
 }
 
-function bigIntFromBytes(value: Buffer): bigint {
+function bytesToBigInt(value: Buffer): bigint {
   return value.length === 0 ? 0n : BigInt(`0x${value.toString('hex')}`);
 }
 
-function stripLeadingZeroes(value: Buffer): Buffer {
-  let offset = 0;
+function trimLeadingZeroBytes(value: Buffer): Buffer {
+  let start = 0;
 
-  while (offset < value.length - 1 && value[offset] === 0) {
-    offset++;
+  while (start < value.length - 1 && value[start] === 0) {
+    start++;
   }
 
-  return value.subarray(offset);
+  return value.subarray(start);
 }
 
-function bigIntToBytes(value: bigint): Buffer {
+function unsignedBigIntToBuffer(value: bigint): Buffer {
   if (value === 0n) {
     return Buffer.from([0]);
   }
 
   let hex = value.toString(16);
-
   if (hex.length % 2 !== 0) {
     hex = `0${hex}`;
   }
 
-  return stripLeadingZeroes(Buffer.from(hex, 'hex'));
+  return trimLeadingZeroBytes(Buffer.from(hex, 'hex'));
 }
 
-function pad(value: bigint): Buffer {
-  const bytes = bigIntToBytes(value);
+function toHashField(value: bigint): Buffer {
+  const bytes = unsignedBigIntToBuffer(value);
+  return bytes.length > SRP_FIELD_BYTES ? bytes.subarray(bytes.length - SRP_FIELD_BYTES) : bytes;
+}
 
-  if (bytes.length > SRP_KEY_SIZE) {
-    return bytes.subarray(bytes.length - SRP_KEY_SIZE);
+function readSizedAsciiHex(buffer: Buffer, offset: number, maxLength: number, fieldName: string): [Buffer, number] {
+  if (offset + AUTH_LENGTH_BYTES > buffer.length) {
+    throw new Error(`Firebird server returned truncated SRP ${fieldName} length.`);
   }
 
-  return bytes;
+  const length = buffer.readUInt16LE(offset);
+  if (length > maxLength) {
+    throw new Error(`Firebird server returned oversized SRP ${fieldName} (${length}).`);
+  }
+
+  const start = offset + AUTH_LENGTH_BYTES;
+  const end = start + length;
+  if (end > buffer.length) {
+    throw new Error(`Firebird server returned truncated SRP ${fieldName}.`);
+  }
+
+  return [buffer.subarray(start, end), end];
 }
 
-function getSecret(): bigint {
-  return bigIntFromBytes(randomBytes(16));
+function parseServerChallenge(authData: Buffer): ServerSrpChallenge {
+  if (authData.length === 0) {
+    throw new Error('Firebird server did not provide SRP authentication data.');
+  }
+
+  if (authData.length > MAX_AUTH_PAYLOAD_BYTES) {
+    throw new Error(`Firebird server returned oversized SRP data (${authData.length}).`);
+  }
+
+  const [salt, keyLengthOffset] = readSizedAsciiHex(authData, 0, SRP_SALT_BYTES * 2, 'salt');
+  const [serverPublicKeyHex, nextOffset] = readSizedAsciiHex(
+    authData,
+    keyLengthOffset,
+    SRP_FIELD_BYTES * 2,
+    'public key',
+  );
+
+  if (nextOffset !== authData.length) {
+    throw new Error('Firebird server returned trailing SRP authentication data.');
+  }
+
+  return {
+    salt: Buffer.from(salt),
+    serverPublicKey: BigInt(`0x${serverPublicKeyHex.toString('ascii')}`),
+  };
 }
 
-function getUserHash(user: string, password: string, salt: Buffer): bigint {
-  return bigIntFromBytes(sha1(salt, sha1(Buffer.from(`${user}:${password}`, 'utf8'))));
+function deriveUserSecret(username: string, password: string, salt: Buffer): bigint {
+  return bytesToBigInt(sha1Bytes(salt, sha1Bytes(Buffer.from(`${username}:${password}`, 'utf8'))));
 }
 
-function getScramble(clientPublicKey: bigint, serverPublicKey: bigint): bigint {
-  return bigIntFromBytes(sha1(pad(clientPublicKey), pad(serverPublicKey)));
+function deriveScramble(clientPublicKey: bigint, serverPublicKey: bigint): bigint {
+  return bytesToBigInt(sha1Bytes(toHashField(clientPublicKey), toHashField(serverPublicKey)));
+}
+
+function getEphemeralSecret(): bigint {
+  return bytesToBigInt(randomBytes(32));
 }
 
 export class SrpClientSession {
-  private readonly privateKey = getSecret();
-  private readonly publicKey = modPow(GENERATOR, this.privateKey, PRIME);
+  private readonly ephemeralSecret = getEphemeralSecret();
+  private readonly publicValue = modPow(SRP_GENERATOR, this.ephemeralSecret, SRP_MODULUS);
   private sessionKey?: Buffer;
 
   constructor(private readonly proofHashAlgorithm: 'sha1' | 'sha256') {}
 
   getPublicKeyHex(): Buffer {
-    return Buffer.from(pad(this.publicKey).toString('hex').toUpperCase(), 'ascii');
+    return Buffer.from(toHashField(this.publicValue).toString('hex').toUpperCase(), 'ascii');
   }
 
   getSessionKey(): Buffer | undefined {
     return this.sessionKey;
   }
 
-  createClientProof(user: string, password: string, authData: Buffer): Buffer {
-    if (authData.length === 0) {
-      throw new Error('Firebird server did not provide SRP authentication data.');
-    }
-
-    if (authData.length > EXPECTED_AUTH_DATA_LENGTH) {
-      throw new Error(`Firebird server returned oversized SRP data (${authData.length}).`);
-    }
-
-    const saltLength = authData.readUInt16LE(0);
-    if (saltLength > SRP_SALT_SIZE * 2) {
-      throw new Error(`Firebird server returned oversized SRP salt (${saltLength}).`);
-    }
-
-    const salt = authData.subarray(2, 2 + saltLength);
-    const keyLength = authData.readUInt16LE(2 + saltLength);
-    const keyStart = 4 + saltLength;
-    if (authData.length - keyStart !== keyLength) {
-      throw new Error('Firebird server returned inconsistent SRP key data.');
-    }
-
-    const serverPublicKeyHex = authData.subarray(keyStart).toString('ascii');
-    const serverPublicKey = BigInt(`0x${serverPublicKeyHex}`);
-    const scramble = getScramble(this.publicKey, serverPublicKey);
-    const x = getUserHash(user, password, salt);
-    const gx = modPow(GENERATOR, x, PRIME);
-    const kgx = (K * gx) % PRIME;
-    const diff = (((serverPublicKey - kgx) % PRIME) + PRIME) % PRIME;
-    const ux = (scramble * x) % PRIME;
-    const aux = (this.privateKey + ux) % PRIME;
-    const sessionSecret = modPow(diff, aux, PRIME);
-    const sessionKey = sha1(bigIntToBytes(sessionSecret));
-
-    const n1 = bigIntFromBytes(sha1(bigIntToBytes(PRIME)));
-    const n2 = bigIntFromBytes(sha1(bigIntToBytes(GENERATOR)));
-    const proof = hash(
+  createClientProof(username: string, password: string, authData: Buffer): Buffer {
+    const { salt, serverPublicKey } = parseServerChallenge(authData);
+    const verifierSecret = deriveUserSecret(username, password, salt);
+    const scramble = deriveScramble(this.publicValue, serverPublicKey);
+    const verifierPower = modPow(SRP_GENERATOR, verifierSecret, SRP_MODULUS);
+    const sharedBase = normalizeMod(serverPublicKey - ((SRP_MULTIPLIER * verifierPower) % SRP_MODULUS), SRP_MODULUS);
+    const sharedExponent = this.ephemeralSecret + scramble * verifierSecret;
+    const sharedSecret = modPow(sharedBase, sharedExponent, SRP_MODULUS);
+    const sessionKey = sha1Bytes(unsignedBigIntToBuffer(sharedSecret));
+    const proof = hashBytes(
       this.proofHashAlgorithm,
-      bigIntToBytes(modPow(n1, n2, PRIME)),
-      stripLeadingZeroes(sha1(Buffer.from(user, 'utf8'))),
+      PROOF_PREFIX,
+      trimLeadingZeroBytes(sha1Bytes(Buffer.from(username, 'utf8'))),
       salt,
-      bigIntToBytes(this.publicKey),
-      bigIntToBytes(serverPublicKey),
+      unsignedBigIntToBuffer(this.publicValue),
+      unsignedBigIntToBuffer(serverPublicKey),
       sessionKey,
     );
 
