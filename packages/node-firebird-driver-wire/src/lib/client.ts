@@ -12,8 +12,6 @@ export function createWireClient(options?: WireClientOptions): Client {
 }
 
 export class ClientImpl extends AbstractClient {
-  readonly supportsEvents = false;
-
   constructor(readonly wireOptions: WireClientOptions = {}) {
     super();
   }

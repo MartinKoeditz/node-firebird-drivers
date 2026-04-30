@@ -13,8 +13,6 @@ import * as fs from 'fs-extra-promise';
 import { ensureDriverTestTmpDir, getDriverTestDatabaseUri, loadDriverTestConfig } from './test-config';
 
 export function runCommonTests(client: Client) {
-  const supportsEvents = (client as any).supportsEvents !== false;
-
   function dateToString(d: Date) {
     return d && `${(d.getFullYear() + '').padStart(4, '0')}-${d.getMonth() + 1}-${d.getDate()}`;
   }
@@ -333,7 +331,7 @@ export function runCommonTests(client: Client) {
         await attachment.dropDatabase();
       });
 
-      (supportsEvents ? test : test.skip)('#queueEvents()', async () => {
+      test('#queueEvents()', async () => {
         const attachment = await client.createDatabase(
           getDriverTestDatabaseUri(testConfig, 'Attachment-queueEvents.fdb'),
         );

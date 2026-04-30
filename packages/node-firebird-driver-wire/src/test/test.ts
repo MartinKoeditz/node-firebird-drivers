@@ -250,7 +250,7 @@ describe('node-firebird-driver-wire', () => {
     });
   });
 
-  test.skip('queues and receives asynchronous events', async () => {
+  test('queues and receives asynchronous events', async () => {
     await withCreatedDatabase('wire-events.fdb', async (database) => {
       const wireProtocol = createProtocol();
 

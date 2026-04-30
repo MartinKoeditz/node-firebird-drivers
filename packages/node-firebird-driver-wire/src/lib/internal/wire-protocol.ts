@@ -288,6 +288,7 @@ export class WireProtocol {
   private eventSocket?: Socket;
   private eventChannel?: SocketChannel;
   private eventLoopPromise?: Promise<void>;
+  private mainChannelQueue: Promise<void> = Promise.resolve();
   private attachmentHandle?: number;
   private currentPluginName: AuthPluginName = 'Legacy_Auth';
   private currentPlugin?: ClientAuthPlugin;
@@ -300,136 +301,150 @@ export class WireProtocol {
   constructor(private readonly options: WireProtocolOptions) {}
 
   async attach(database: string, dpb: Buffer): Promise<AttachmentHandle> {
-    if (this.attachmentHandle) {
-      throw new Error('A database is already attached on this protocol instance.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (this.attachmentHandle) {
+        throw new Error('A database is already attached on this protocol instance.');
+      }
 
-    await this.openSocket();
-    const attachAuthData = await this.performConnectHandshake(database);
-    return await this.executeAttachmentOperation(op_attach, database, dpb, attachAuthData, 'attach');
+      await this.openSocket();
+      const attachAuthData = await this.performConnectHandshake(database);
+      return await this.executeAttachmentOperation(op_attach, database, dpb, attachAuthData, 'attach');
+    });
   }
 
   async createDatabase(database: string, dpb: Buffer): Promise<AttachmentHandle> {
-    if (this.attachmentHandle) {
-      throw new Error('A database is already attached on this protocol instance.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (this.attachmentHandle) {
+        throw new Error('A database is already attached on this protocol instance.');
+      }
 
-    await this.openSocket();
-    const attachAuthData = await this.performConnectHandshake(database);
-    return await this.executeAttachmentOperation(op_create, database, dpb, attachAuthData, 'create');
+      await this.openSocket();
+      const attachAuthData = await this.performConnectHandshake(database);
+      return await this.executeAttachmentOperation(op_create, database, dpb, attachAuthData, 'create');
+    });
   }
 
   async detach(attachment: AttachmentHandle): Promise<void> {
-    if (this.attachmentHandle !== attachment.handle) {
-      throw new Error('Attachment handle is not active.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (this.attachmentHandle !== attachment.handle) {
+        throw new Error('Attachment handle is not active.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_detach);
-    writer.writeInt32(0);
-    await this.channel!.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_detach);
+      writer.writeInt32(0);
+      await this.channel!.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while detaching.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while detaching.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird detach failed');
-    this.attachmentHandle = undefined;
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird detach failed');
+      this.attachmentHandle = undefined;
+    });
   }
 
   async dropDatabase(attachment: AttachmentHandle): Promise<void> {
-    if (this.attachmentHandle !== attachment.handle) {
-      throw new Error('Attachment handle is not active.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (this.attachmentHandle !== attachment.handle) {
+        throw new Error('Attachment handle is not active.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_drop_database);
-    writer.writeInt32(0);
-    await this.channel!.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_drop_database);
+      writer.writeInt32(0);
+      await this.channel!.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while dropping the database.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while dropping the database.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird drop database failed');
-    this.attachmentHandle = undefined;
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird drop database failed');
+      this.attachmentHandle = undefined;
+    });
   }
 
   async ping(): Promise<void> {
-    if (!this.channel) {
-      throw new Error('Wire protocol socket is not open.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (!this.channel) {
+        throw new Error('Wire protocol socket is not open.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_ping);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_ping);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while pinging.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while pinging.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird ping failed');
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird ping failed');
+    });
   }
 
   async queueEvents(names: readonly string[], callback: EventCallback): Promise<EventHandle> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before queueing events.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before queueing events.');
+      }
 
-    await this.ensureEventChannel();
+      await this.ensureEventChannel();
 
-    const eventHandle: EventHandle = {
-      id: this.nextEventId++,
-      names: [...names],
-    };
+      const eventHandle: EventHandle = {
+        id: this.nextEventId++,
+        names: [...names],
+      };
 
-    const subscription: EventSubscription = {
-      ...eventHandle,
-      callback,
-      eventBuffer: this.buildEventBlock(names),
-    };
-    this.eventSubscriptions.set(eventHandle.id, subscription);
+      const subscription: EventSubscription = {
+        ...eventHandle,
+        callback,
+        eventBuffer: this.buildEventBlock(names),
+      };
+      this.eventSubscriptions.set(eventHandle.id, subscription);
 
-    try {
-      await this.sendQueueEvents(subscription);
-      return eventHandle;
-    } catch (error) {
-      this.eventSubscriptions.delete(subscription.id);
-      throw error;
-    }
+      try {
+        await this.sendQueueEvents(subscription);
+        return eventHandle;
+      } catch (error) {
+        this.eventSubscriptions.delete(subscription.id);
+        throw error;
+      }
+    });
   }
 
   async cancelEvents(event: EventHandle): Promise<void> {
-    const subscription = this.eventSubscriptions.get(event.id);
-    if (!subscription) {
-      return;
-    }
+    await this.runMainChannelTask(async () => {
+      const subscription = this.eventSubscriptions.get(event.id);
+      if (!subscription) {
+        return;
+      }
 
-    this.eventSubscriptions.delete(event.id);
+      this.eventSubscriptions.delete(event.id);
 
-    if (!this.channel || this.attachmentHandle == undefined) {
-      return;
-    }
+      if (!this.channel || this.attachmentHandle == undefined) {
+        return;
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_cancel_events);
-    writer.writeInt32(0);
-    writer.writeInt32(event.id);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_cancel_events);
+      writer.writeInt32(0);
+      writer.writeInt32(event.id);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while cancelling events.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while cancelling events.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird cancel events failed');
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird cancel events failed');
+    });
   }
 
   async cancelOperation(kind: number): Promise<void> {
@@ -449,44 +464,56 @@ export class WireProtocol {
   }
 
   async startTransaction(tpb: Buffer): Promise<TransactionHandle> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before starting a transaction.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before starting a transaction.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_transaction);
-    writer.writeInt32(0);
-    writer.writeBuffer(tpb);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_transaction);
+      writer.writeInt32(0);
+      writer.writeBuffer(tpb);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while starting a transaction.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while starting a transaction.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird start transaction failed');
-    return { handle: response.handle };
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird start transaction failed');
+      return { handle: response.handle };
+    });
   }
 
   async commit(transaction: TransactionHandle): Promise<void> {
-    await this.finishTransaction(op_commit, transaction, 'commit');
+    await this.runMainChannelTask(async () => {
+      await this.finishTransaction(op_commit, transaction, 'commit');
+    });
   }
 
   async rollback(transaction: TransactionHandle): Promise<void> {
-    await this.finishTransaction(op_rollback, transaction, 'rollback');
+    await this.runMainChannelTask(async () => {
+      await this.finishTransaction(op_rollback, transaction, 'rollback');
+    });
   }
 
   async commitRetaining(transaction: TransactionHandle): Promise<void> {
-    await this.finishTransaction(op_commit_retaining, transaction, 'commit retaining');
+    await this.runMainChannelTask(async () => {
+      await this.finishTransaction(op_commit_retaining, transaction, 'commit retaining');
+    });
   }
 
   async rollbackRetaining(transaction: TransactionHandle): Promise<void> {
-    await this.finishTransaction(op_rollback_retaining, transaction, 'rollback retaining');
+    await this.runMainChannelTask(async () => {
+      await this.finishTransaction(op_rollback_retaining, transaction, 'rollback retaining');
+    });
   }
 
   async createBlob(transaction: TransactionHandle, bpb: Uint8Array = Buffer.alloc(0)): Promise<BlobHandle> {
-    return await this.openOrCreateBlob(op_create_blob2, transaction, Buffer.alloc(8), bpb, 'create blob');
+    return await this.runMainChannelTask(async () => {
+      return await this.openOrCreateBlob(op_create_blob2, transaction, Buffer.alloc(8), bpb, 'create blob');
+    });
   }
 
   async openBlob(
@@ -494,103 +521,117 @@ export class WireProtocol {
     blobId: Uint8Array,
     bpb: Uint8Array = Buffer.alloc(0),
   ): Promise<BlobHandle> {
-    return await this.openOrCreateBlob(op_open_blob2, transaction, blobId, bpb, 'open blob');
+    return await this.runMainChannelTask(async () => {
+      return await this.openOrCreateBlob(op_open_blob2, transaction, blobId, bpb, 'open blob');
+    });
   }
 
   async getSegment(blob: BlobHandle, bufferLength: number): Promise<BlobSegmentResponse> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before reading a blob segment.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before reading a blob segment.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_get_segment);
-    writer.writeInt32(blob.handle);
-    writer.writeInt32(bufferLength);
-    writer.writeBuffer(Buffer.alloc(0));
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_get_segment);
+      writer.writeInt32(blob.handle);
+      writer.writeInt32(bufferLength);
+      writer.writeBuffer(Buffer.alloc(0));
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while getting a blob segment.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while getting a blob segment.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird get blob segment failed');
-    return {
-      state: response.handle,
-      data: response.data,
-    };
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird get blob segment failed');
+      return {
+        state: response.handle,
+        data: response.data,
+      };
+    });
   }
 
   async putSegment(blob: BlobHandle, segment: Buffer): Promise<void> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before writing a blob segment.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before writing a blob segment.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_put_segment);
-    writer.writeInt32(blob.handle);
-    writer.writeInt32(segment.length);
-    writer.writeBuffer(segment);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_put_segment);
+      writer.writeInt32(blob.handle);
+      writer.writeInt32(segment.length);
+      writer.writeBuffer(segment);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while putting a blob segment.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while putting a blob segment.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird put blob segment failed');
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird put blob segment failed');
+    });
   }
 
   async seekBlob(blob: BlobHandle, mode: number, offset: number): Promise<number> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before seeking a blob.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before seeking a blob.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_seek_blob);
-    writer.writeInt32(blob.handle);
-    writer.writeInt32(mode);
-    writer.writeInt32(offset);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_seek_blob);
+      writer.writeInt32(blob.handle);
+      writer.writeInt32(mode);
+      writer.writeInt32(offset);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while seeking a blob.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while seeking a blob.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird seek blob failed');
-    return response.handle !== 0 ? response.handle : response.quad.readInt32BE(4);
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird seek blob failed');
+      return response.handle !== 0 ? response.handle : response.quad.readInt32BE(4);
+    });
   }
 
   async closeBlob(blob: BlobHandle): Promise<void> {
-    await this.finishBlob(op_close_blob, blob, 'close blob');
+    await this.runMainChannelTask(async () => {
+      await this.finishBlob(op_close_blob, blob, 'close blob');
+    });
   }
 
   async cancelBlob(blob: BlobHandle): Promise<void> {
-    await this.finishBlob(op_cancel_blob, blob, 'cancel blob');
+    await this.runMainChannelTask(async () => {
+      await this.finishBlob(op_cancel_blob, blob, 'cancel blob');
+    });
   }
 
   async allocateStatement(): Promise<StatementHandle> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before allocating a statement.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before allocating a statement.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_allocate_statement);
-    writer.writeInt32(this.attachmentHandle);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_allocate_statement);
+      writer.writeInt32(this.attachmentHandle);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while allocating a statement.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while allocating a statement.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird allocate statement failed');
-    return { handle: response.handle };
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird allocate statement failed');
+      return { handle: response.handle };
+    });
   }
 
   async prepareStatement(
@@ -599,42 +640,43 @@ export class WireProtocol {
     sql: string,
     sqlDialect = 3,
   ): Promise<void> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before preparing a statement.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before preparing a statement.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_prepare_statement);
-    writer.writeInt32(transaction.handle);
-    writer.writeInt32(statement.handle);
-    writer.writeInt32(sqlDialect);
-    writer.writeString(sql);
-    writer.writeBuffer(STATEMENT_BASE_INFO_ITEMS);
-    writer.writeInt32(INFO_BUFFER_LENGTH);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_prepare_statement);
+      writer.writeInt32(transaction.handle);
+      writer.writeInt32(statement.handle);
+      writer.writeInt32(sqlDialect);
+      writer.writeString(sql);
+      writer.writeBuffer(STATEMENT_BASE_INFO_ITEMS);
+      writer.writeInt32(INFO_BUFFER_LENGTH);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while preparing a statement.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while preparing a statement.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
-    // FIXME: Do single getInfo
-    const selectInfo = await this.getInfo(
-      op_info_sql,
-      statement.handle,
-      STATEMENT_SELECT_INFO_ITEMS,
-      'statement output metadata',
-    );
-    const bindInfo = await this.getInfo(
-      op_info_sql,
-      statement.handle,
-      STATEMENT_BIND_INFO_ITEMS,
-      'statement input metadata',
-    );
-    const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
-    this.statementMetadata.set(statement.handle, this.parseStatementMetadata(metadataInfo));
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
+      const selectInfo = await this.getInfo(
+        op_info_sql,
+        statement.handle,
+        STATEMENT_SELECT_INFO_ITEMS,
+        'statement output metadata',
+      );
+      const bindInfo = await this.getInfo(
+        op_info_sql,
+        statement.handle,
+        STATEMENT_BIND_INFO_ITEMS,
+        'statement input metadata',
+      );
+      const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
+      this.statementMetadata.set(statement.handle, this.parseStatementMetadata(metadataInfo));
+    });
   }
 
   async executeStatement(
@@ -642,7 +684,9 @@ export class WireProtocol {
     statement: StatementHandle,
     inputMessage?: Buffer,
   ): Promise<Buffer | undefined> {
-    return await this.executePreparedStatement(transaction, statement, inputMessage, false);
+    return await this.runMainChannelTask(async () => {
+      return await this.executePreparedStatement(transaction, statement, inputMessage, false);
+    });
   }
 
   async executeStatementReturning(
@@ -650,36 +694,44 @@ export class WireProtocol {
     statement: StatementHandle,
     inputMessage?: Buffer,
   ): Promise<Buffer | undefined> {
-    return await this.executePreparedStatement(transaction, statement, inputMessage, true);
+    return await this.runMainChannelTask(async () => {
+      return await this.executePreparedStatement(transaction, statement, inputMessage, true);
+    });
   }
 
   async setCursorName(statement: StatementHandle, cursorName: string): Promise<void> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before setting a cursor name.');
-    }
+    await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before setting a cursor name.');
+      }
 
-    const writer = new XdrWriter();
-    writer.writeInt32(op_set_cursor);
-    writer.writeInt32(statement.handle);
-    writer.writeString(cursorName);
-    writer.writeInt32(0);
-    await this.channel.write(writer.toBuffer());
+      const writer = new XdrWriter();
+      writer.writeInt32(op_set_cursor);
+      writer.writeInt32(statement.handle);
+      writer.writeString(cursorName);
+      writer.writeInt32(0);
+      await this.channel.write(writer.toBuffer());
 
-    const operation = await this.readOperation();
-    if (operation !== op_response) {
-      throw new Error(`Unexpected operation ${operation} while setting a cursor name.`);
-    }
+      const operation = await this.readOperation();
+      if (operation !== op_response) {
+        throw new Error(`Unexpected operation ${operation} while setting a cursor name.`);
+      }
 
-    const response = await this.readResponse();
-    assertSuccessfulResponse(response.status, 'Firebird set cursor name failed');
+      const response = await this.readResponse();
+      assertSuccessfulResponse(response.status, 'Firebird set cursor name failed');
+    });
   }
 
   async getSqlInfo(statement: StatementHandle, items: Buffer): Promise<Buffer> {
-    return await this.getInfo(op_info_sql, statement.handle, items, 'sql info');
+    return await this.runMainChannelTask(async () => {
+      return await this.getInfo(op_info_sql, statement.handle, items, 'sql info');
+    });
   }
 
   async getBlobInfo(blob: BlobHandle, items: Buffer): Promise<Buffer> {
-    return await this.getInfo(op_info_blob, blob.handle, items, 'blob info');
+    return await this.runMainChannelTask(async () => {
+      return await this.getInfo(op_info_blob, blob.handle, items, 'blob info');
+    });
   }
 
   getStatementMetadata(statement: StatementHandle): StatementMetadata {
@@ -696,84 +748,92 @@ export class WireProtocol {
     statement: StatementHandle,
     inputMessage?: Buffer,
   ): Promise<CursorHandle> {
-    const metadata = this.getStatementMetadata(statement);
+    return await this.runMainChannelTask(async () => {
+      const metadata = this.getStatementMetadata(statement);
 
-    if ((metadata.flags & STATEMENT_FLAG_HAS_CURSOR) === 0) {
-      throw new Error('Statement does not produce a cursor.');
-    }
+      if ((metadata.flags & STATEMENT_FLAG_HAS_CURSOR) === 0) {
+        throw new Error('Statement does not produce a cursor.');
+      }
 
-    await this.executePreparedStatement(transaction, statement, inputMessage, false);
-    this.exhaustedCursors.delete(statement.handle);
-    return {
-      statement,
-      columns: metadata.outputColumns,
-      fetchBlr: metadata.outputBlr,
-      fetchMessageLength: metadata.outputMessageLength,
-    };
+      await this.executePreparedStatement(transaction, statement, inputMessage, false);
+      this.exhaustedCursors.delete(statement.handle);
+      return {
+        statement,
+        columns: metadata.outputColumns,
+        fetchBlr: metadata.outputBlr,
+        fetchMessageLength: metadata.outputMessageLength,
+      };
+    });
   }
 
   async fetchNext(cursor: CursorHandle): Promise<Buffer | undefined> {
-    if (!this.channel || this.attachmentHandle == undefined) {
-      throw new Error('A database must be attached before fetching from a cursor.');
-    }
+    return await this.runMainChannelTask(async () => {
+      if (!this.channel || this.attachmentHandle == undefined) {
+        throw new Error('A database must be attached before fetching from a cursor.');
+      }
 
-    const metadata = this.statementMetadata.get(cursor.statement.handle);
-    if (!metadata) {
-      throw new Error('Statement metadata is not available for cursor fetch.');
-    }
+      const metadata = this.statementMetadata.get(cursor.statement.handle);
+      if (!metadata) {
+        throw new Error('Statement metadata is not available for cursor fetch.');
+      }
 
-    if (this.exhaustedCursors.has(cursor.statement.handle)) {
-      return undefined;
-    }
-
-    const writer = new XdrWriter();
-    writer.writeInt32(op_fetch);
-    writer.writeInt32(cursor.statement.handle);
-    writer.writeBuffer(cursor.fetchBlr);
-    writer.writeInt32(0);
-    writer.writeInt32(1);
-    await this.channel.write(writer.toBuffer());
-
-    const operation = await this.readOperation();
-    if (operation === op_response) {
-      const response = await this.readResponse();
-      assertSuccessfulResponse(response.status, 'Firebird fetch cursor row failed');
-      return undefined;
-    }
-
-    if (operation !== op_fetch_response) {
-      throw new Error(`Unexpected operation ${operation} while fetching a cursor row.`);
-    }
-
-    const status = (await this.channel.readExactly(4)).readInt32BE(0);
-    const messages = (await this.channel.readExactly(4)).readInt32BE(0);
-
-    if (messages === 0) {
-      if (status === FETCH_NO_DATA) {
-        this.exhaustedCursors.add(cursor.statement.handle);
+      if (this.exhaustedCursors.has(cursor.statement.handle)) {
         return undefined;
       }
-      if (status === 0) {
+
+      const writer = new XdrWriter();
+      writer.writeInt32(op_fetch);
+      writer.writeInt32(cursor.statement.handle);
+      writer.writeBuffer(cursor.fetchBlr);
+      writer.writeInt32(0);
+      writer.writeInt32(1);
+      await this.channel.write(writer.toBuffer());
+
+      const operation = await this.readOperation();
+      if (operation === op_response) {
+        const response = await this.readResponse();
+        assertSuccessfulResponse(response.status, 'Firebird fetch cursor row failed');
         return undefined;
       }
-      throw new Error(`Firebird cursor fetch failed with status ${status}.`);
-    }
 
-    if (messages !== 1) {
-      throw new Error(`Unsupported cursor fetch batch size ${messages}.`);
-    }
+      if (operation !== op_fetch_response) {
+        throw new Error(`Unexpected operation ${operation} while fetching a cursor row.`);
+      }
 
-    const rowBuffer = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
-    await this.readFetchBatchMarker(cursor.statement.handle);
-    return rowBuffer;
+      const status = (await this.channel.readExactly(4)).readInt32BE(0);
+      const messages = (await this.channel.readExactly(4)).readInt32BE(0);
+
+      if (messages === 0) {
+        if (status === FETCH_NO_DATA) {
+          this.exhaustedCursors.add(cursor.statement.handle);
+          return undefined;
+        }
+        if (status === 0) {
+          return undefined;
+        }
+        throw new Error(`Firebird cursor fetch failed with status ${status}.`);
+      }
+
+      if (messages !== 1) {
+        throw new Error(`Unsupported cursor fetch batch size ${messages}.`);
+      }
+
+      const rowBuffer = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
+      await this.readFetchBatchMarker(cursor.statement.handle);
+      return rowBuffer;
+    });
   }
 
   async closeCursor(statement: StatementHandle): Promise<void> {
-    await this.finishStatement(statement, DSQL_close, 'close cursor');
+    await this.runMainChannelTask(async () => {
+      await this.finishStatement(statement, DSQL_close, 'close cursor');
+    });
   }
 
   async freeStatement(statement: StatementHandle): Promise<void> {
-    await this.finishStatement(statement, DSQL_drop, 'free statement');
+    await this.runMainChannelTask(async () => {
+      await this.finishStatement(statement, DSQL_drop, 'free statement');
+    });
   }
 
   async close(): Promise<void> {
@@ -831,6 +891,22 @@ export class WireProtocol {
 
     this.socket = socket;
     this.channel = new SocketChannel(socket);
+  }
+
+  private async runMainChannelTask<T>(task: () => Promise<T>): Promise<T> {
+    const previous = this.mainChannelQueue;
+    let release: () => void = undefined!;
+    this.mainChannelQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+
+    try {
+      return await task();
+    } finally {
+      release();
+    }
   }
 
   private async ensureEventChannel(): Promise<void> {
@@ -1434,6 +1510,17 @@ export class WireProtocol {
 
     const counters = this.calculateEventCounts(subscription.eventBuffer, event.items, subscription.names);
     subscription.eventBuffer = Buffer.from(event.items);
+
+    if (this.eventSubscriptions.get(subscription.id) === subscription) {
+      await this.runMainChannelTask(async () => {
+        if (this.eventSubscriptions.get(subscription.id) !== subscription) {
+          return;
+        }
+
+        await this.sendQueueEvents(subscription);
+      });
+    }
+
     await subscription.callback(counters);
   }
 
