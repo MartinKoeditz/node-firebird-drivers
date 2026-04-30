@@ -3,6 +3,7 @@ import {
   getDriverTestDatabasePath,
   loadDriverTestConfig,
 } from '../../../node-firebird-driver/src/test/test-config';
+import { tpb } from '../../../node-firebird-driver/src/lib/impl/fb-util';
 import {
   isc_dpb_lc_ctype,
   isc_dpb_overwrite,
@@ -45,6 +46,10 @@ describe('node-firebird-driver-wire', () => {
       writeTraditionalClumplet(isc_dpb_overwrite, Buffer.from([overwrite ? 1 : 0])),
       writeTraditionalClumplet(isc_dpb_utf8_filename, Buffer.alloc(0)),
     ]);
+  }
+
+  function createTpb(): Buffer {
+    return Buffer.from([tpb.version1, tpb.concurrency, tpb.wait, tpb.write]);
   }
 
   function createProtocol(password = validPassword): WireProtocol {
@@ -106,6 +111,20 @@ describe('node-firebird-driver-wire', () => {
         const wireAttachment = await wireProtocol.attach(database, createAttachDpb());
         await expect(wireProtocol.ping()).resolves.toBeUndefined();
         await wireProtocol.detach(wireAttachment);
+      } finally {
+        await wireProtocol.close();
+      }
+    });
+  });
+
+  test('starts a transaction with a TPB', async () => {
+    await withCreatedDatabase('wire-start-transaction.fdb', async (database) => {
+      const wireProtocol = createProtocol();
+
+      try {
+        await wireProtocol.attach(database, createAttachDpb());
+        const transaction = await wireProtocol.startTransaction(createTpb());
+        expect(transaction.handle).toBeGreaterThanOrEqual(0);
       } finally {
         await wireProtocol.close();
       }

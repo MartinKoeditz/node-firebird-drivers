@@ -35,6 +35,7 @@ import {
   op_ping,
   op_reject,
   op_response,
+  op_transaction,
   ptype_batch_send,
   ptype_lazy_send,
   SUPPORTED_PROTOCOLS,
@@ -54,6 +55,10 @@ export interface WireProtocolOptions {
 }
 
 export interface AttachmentHandle {
+  readonly handle: number;
+}
+
+export interface TransactionHandle {
   readonly handle: number;
 }
 
@@ -161,6 +166,27 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird ping failed');
+  }
+
+  async startTransaction(tpb: Buffer): Promise<TransactionHandle> {
+    if (!this.channel || this.attachmentHandle == undefined) {
+      throw new Error('A database must be attached before starting a transaction.');
+    }
+
+    const writer = new XdrWriter();
+    writer.writeInt32(op_transaction);
+    writer.writeInt32(0);
+    writer.writeBuffer(tpb);
+    await this.channel.write(writer.toBuffer());
+
+    const operation = await this.readOperation();
+    if (operation !== op_response) {
+      throw new Error(`Unexpected operation ${operation} while starting a transaction.`);
+    }
+
+    const response = await this.readResponse();
+    assertSuccessfulResponse(response.status, 'Firebird start transaction failed');
+    return { handle: response.handle };
   }
 
   async close(): Promise<void> {

@@ -9,6 +9,7 @@ export const op_response = 9;
 export const op_attach = 19;
 export const op_create = 20;
 export const op_detach = 21;
+export const op_transaction = 29;
 export const op_dummy = 71;
 export const op_drop_database = 81;
 export const op_cont_auth = 92;
