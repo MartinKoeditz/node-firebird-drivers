@@ -95,6 +95,7 @@ export class SocketChannel {
     }
 
     this.bufferedLength -= length;
+
     return result;
   }
 }

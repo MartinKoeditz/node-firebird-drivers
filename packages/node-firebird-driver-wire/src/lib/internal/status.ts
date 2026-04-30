@@ -27,6 +27,7 @@ export class FirebirdWireError extends Error {
   }
 }
 
+// FIXME:
 function formatKnownStatus(status: ParsedStatusVector): string | undefined {
   if (status.gdsCodes.length === 1 && status.gdsCodes[0] === 335544794) {
     return 'operation was cancelled';
@@ -120,14 +121,17 @@ export function assertSuccessfulResponse(status: ParsedStatusVector, fallbackMes
   }
 
   const knownStatus = formatKnownStatus(status);
+
   if (knownStatus) {
     throw new FirebirdWireError(knownStatus, status);
   }
 
   const detailParts: string[] = [];
+
   if (status.gdsCodes.length > 0) {
     detailParts.push(`gds=${status.gdsCodes.join(',')}`);
   }
+
   if (status.messages.length > 0) {
     detailParts.push(status.messages.join(' | '));
   }

@@ -24,6 +24,7 @@ import { writeTraditionalClumplet, writeWideClumplet, writeWideStringClumplet, X
 const { list: AUTH_PLUGINS } = authPlugin;
 type AuthPluginName = authPlugin.Name;
 
+// FIXME:
 const {
   begin: blr_begin,
   blob2: blr_blob2,
@@ -46,6 +47,7 @@ const {
   version5: blr_version5,
 } = blr;
 
+// FIXME:
 const {
   clientCrypt: CNCT_client_crypt,
   host: CNCT_host,
@@ -57,10 +59,12 @@ const {
   userVerification: CNCT_user_verification,
 } = connectParameter;
 
+// FIXME:
 const { async: P_REQ_async } = protocolRequest;
 const { hasCursor: STATEMENT_FLAG_HAS_CURSOR } = statementFlag;
 const { enabled: WIRE_CRYPT_ENABLED } = wireCrypt;
 
+// FIXME:
 const {
   accept: op_accept,
   acceptData: op_accept_data,
@@ -106,6 +110,7 @@ const {
   transaction: op_transaction,
 } = wireOp;
 
+// FIXME:
 const { batchSend: ptype_batch_send } = wirePacketType;
 const {
   archGeneric: arch_generic,
@@ -426,6 +431,7 @@ export class WireProtocol {
     });
   }
 
+  // FIXME: kind?
   async cancelOperation(kind: number): Promise<void> {
     if (!this.channel) {
       throw new Error('Wire protocol socket is not open.');
@@ -641,6 +647,8 @@ export class WireProtocol {
 
       const response = await this.readResponse();
       assertSuccessfulResponse(response.status, 'Firebird prepare statement failed');
+
+      // FIXME: Why two calls?
       const selectInfo = await this.getInfo(
         op_info_sql,
         statement.handle,
@@ -653,6 +661,7 @@ export class WireProtocol {
         STATEMENT_BIND_INFO_ITEMS,
         'statement input metadata',
       );
+
       const metadataInfo = this.concatInfoBuffers([response.data, selectInfo, bindInfo]);
       this.statementMetadata.set(statement.handle, this.parseStatementMetadata(metadataInfo));
     });
@@ -736,6 +745,7 @@ export class WireProtocol {
 
       await this.executePreparedStatement(transaction, statement, inputMessage, false);
       this.exhaustedCursors.delete(statement.handle);
+
       return {
         statement,
         columns: metadata.outputColumns,
@@ -787,9 +797,11 @@ export class WireProtocol {
           this.exhaustedCursors.add(cursor.statement.handle);
           return undefined;
         }
+
         if (status === 0) {
           return undefined;
         }
+
         throw new Error(`Firebird cursor fetch failed with status ${status}.`);
       }
 
@@ -1069,11 +1081,14 @@ export class WireProtocol {
 
     let outputMessage: Buffer | undefined;
     let operation = await this.readOperation();
+
     if (withOutput && operation === op_sql_response) {
       const messages = (await this.channel.readExactly(4)).readInt32BE(0);
+
       if (messages > 0) {
         outputMessage = await this.readPackedMessageBuffer(metadata.outputColumns, metadata.outputMessageLength);
       }
+
       operation = await this.readOperation();
     }
 
@@ -1083,6 +1098,7 @@ export class WireProtocol {
 
     const response = await this.readResponse();
     assertSuccessfulResponse(response.status, 'Firebird execute statement failed');
+
     return outputMessage;
   }
 
@@ -1132,6 +1148,7 @@ export class WireProtocol {
     writer.writeBuffer(identification);
 
     let weight = SUPPORTED_PROTOCOLS.length;
+
     for (const protocolVersion of SUPPORTED_PROTOCOLS) {
       writer.writeInt32(protocolVersion);
       writer.writeInt32(arch_generic);
@@ -1162,6 +1179,7 @@ export class WireProtocol {
 
     while (true) {
       const operation = await this.readOperation();
+
       if (operation === op_accept) {
         return this.currentPlugin.initialData;
       }
@@ -1169,10 +1187,12 @@ export class WireProtocol {
       if (operation === op_accept_data || operation === op_cond_accept) {
         const accept = await this.readAcceptMessage();
         const attachAuthData = accept.authenticated ? undefined : this.processAcceptPlugin(accept);
+
         if (operation === op_cond_accept && !accept.authenticated) {
           await this.writeContinueAuthentication(attachAuthData ?? Buffer.alloc(0));
           continue;
         }
+
         return attachAuthData;
       }
 
@@ -1297,6 +1317,7 @@ export class WireProtocol {
     parts.push(writeWideStringClumplet(dpb.auth_plugin_name, this.currentPluginName));
     parts.push(writeWideStringClumplet(dpb.auth_plugin_list, this.buildRemainingPluginList(this.currentPluginName)));
     parts.push(writeWideClumplet(dpb.specific_auth_data, attachAuthData));
+
     return Buffer.concat(parts);
   }
 
@@ -1449,6 +1470,7 @@ export class WireProtocol {
     try {
       while (this.eventChannel) {
         const operation = await this.readOperationFrom(this.eventChannel);
+
         if (operation === op_event) {
           const event = await this.readEventMessage(this.eventChannel);
           await this.dispatchEvent(event);
@@ -1467,6 +1489,7 @@ export class WireProtocol {
       }
     } finally {
       this.eventChannel = undefined;
+
       if (this.eventSocket) {
         const eventSocket = this.eventSocket;
         this.eventSocket = undefined;
@@ -1477,6 +1500,7 @@ export class WireProtocol {
 
   private async dispatchEvent(event: EventMessage): Promise<void> {
     const subscription = this.eventSubscriptions.get(event.requestId);
+
     if (!subscription) {
       return;
     }
@@ -1499,7 +1523,7 @@ export class WireProtocol {
 
   private getSystemUserName(): string {
     try {
-      return userInfo().username || 'node-firebird-driver-wire';
+      return userInfo().username ?? 'node-firebird-driver-wire';
     } catch {
       return 'node-firebird-driver-wire';
     }
@@ -1798,6 +1822,7 @@ export class WireProtocol {
     const normalizedOutputColumns = this.normalizeColumns(outputColumns);
     const inputFormat = this.buildMessageFormat(normalizedInputColumns);
     const outputFormat = this.buildMessageFormat(normalizedOutputColumns);
+
     return {
       type: statementType,
       flags: statementFlag,
@@ -1817,6 +1842,7 @@ export class WireProtocol {
 
     const length = data.readUInt16LE(offset);
     const valueOffset = offset + 2;
+
     return {
       value: this.readLittleEndianInteger(data, valueOffset, length),
       nextOffset: Math.min(valueOffset + length, data.length),
@@ -1831,6 +1857,7 @@ export class WireProtocol {
     const length = data.readUInt16LE(offset);
     const valueOffset = offset + 2;
     const endOffset = Math.min(valueOffset + length, data.length);
+
     return {
       value: data.subarray(valueOffset, endOffset).toString('utf8'),
       nextOffset: endOffset,
@@ -2062,6 +2089,7 @@ export class WireProtocol {
 
     const paddedLength = length + ((4 - (length % 4)) & 3);
     const value = await this.channel!.readExactly(paddedLength);
+
     return value.subarray(0, length);
   }
 

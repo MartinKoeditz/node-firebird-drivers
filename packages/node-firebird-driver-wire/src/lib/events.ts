@@ -21,7 +21,7 @@ export class EventsImpl extends AbstractEvents {
     return events;
   }
 
-  protected async internalCancel(): Promise<void> {
+  protected override async internalCancel(): Promise<void> {
     if (!this.eventHandle) {
       return;
     }

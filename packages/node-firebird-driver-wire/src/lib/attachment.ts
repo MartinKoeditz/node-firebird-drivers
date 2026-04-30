@@ -76,8 +76,8 @@ export class AttachmentImpl extends AbstractAttachment {
     attachment.charSetForNONE = options?.charSetForNONE ?? 'utf8';
 
     const parsed = parseDatabaseUri(uri);
-    const username = options?.username ?? process.env.ISC_USER ?? 'sysdba';
-    const password = options?.password ?? process.env.ISC_PASSWORD ?? 'masterkey';
+    const username = options?.username ?? process.env.ISC_USER ?? '';
+    const password = options?.password ?? process.env.ISC_PASSWORD ?? '';
 
     attachment.protocol = new WireProtocol({
       host: parsed.host,
@@ -95,7 +95,7 @@ export class AttachmentImpl extends AbstractAttachment {
     return attachment;
   }
 
-  protected async internalDisconnect(): Promise<void> {
+  protected override async internalDisconnect(): Promise<void> {
     try {
       await this.protocol!.detach(this.attachmentHandle!);
     } finally {
@@ -105,7 +105,7 @@ export class AttachmentImpl extends AbstractAttachment {
     }
   }
 
-  protected async internalDropDatabase(): Promise<void> {
+  protected override async internalDropDatabase(): Promise<void> {
     try {
       await this.protocol!.dropDatabase(this.attachmentHandle!);
     } finally {
@@ -115,30 +115,30 @@ export class AttachmentImpl extends AbstractAttachment {
     }
   }
 
-  protected async internalEnableCancellation(enable: boolean): Promise<void> {
+  protected override async internalEnableCancellation(enable: boolean): Promise<void> {
     await this.protocol!.cancelOperation(enable ? cancelType.enable : cancelType.disable);
   }
 
-  protected async internalCancelOperation(forcibleAbort: boolean): Promise<void> {
+  protected override async internalCancelOperation(forcibleAbort: boolean): Promise<void> {
     await this.protocol!.cancelOperation(forcibleAbort ? cancelType.abort : cancelType.raise);
   }
 
-  protected async internalStartTransaction(options?: TransactionOptions): Promise<TransactionImpl> {
+  protected override async internalStartTransaction(options?: TransactionOptions): Promise<TransactionImpl> {
     return await TransactionImpl.start(this, options);
   }
 
-  protected async internalCreateBlob(
+  protected override async internalCreateBlob(
     transaction: TransactionImpl,
     options?: CreateBlobOptions,
   ): Promise<BlobStreamImpl> {
     return await BlobStreamImpl.create(this, transaction, options);
   }
 
-  protected async internalOpenBlob(transaction: TransactionImpl, blob: Blob): Promise<BlobStreamImpl> {
+  protected override async internalOpenBlob(transaction: TransactionImpl, blob: Blob): Promise<BlobStreamImpl> {
     return await BlobStreamImpl.open(this, transaction, blob);
   }
 
-  protected async internalPrepare(
+  protected override async internalPrepare(
     transaction: TransactionImpl,
     sqlStmt: string,
     options?: PrepareOptions,
@@ -146,7 +146,7 @@ export class AttachmentImpl extends AbstractAttachment {
     return await StatementImpl.prepare(this, transaction, sqlStmt, options);
   }
 
-  protected async internalQueueEvents(
+  protected override async internalQueueEvents(
     names: string[],
     callBack: (counters: [string, number][]) => Promise<void>,
   ): Promise<EventsImpl> {

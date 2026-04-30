@@ -16,15 +16,18 @@ export class ClientImpl extends AbstractClient {
     super();
   }
 
-  protected async internalConnect(uri: string, options?: ConnectOptions): Promise<AttachmentImpl> {
+  protected override async internalConnect(uri: string, options?: ConnectOptions): Promise<AttachmentImpl> {
     return await AttachmentImpl.connect(this, uri, options);
   }
 
-  protected async internalCreateDatabase(uri: string, options?: CreateDatabaseOptions): Promise<AttachmentImpl> {
+  protected override async internalCreateDatabase(
+    uri: string,
+    options?: CreateDatabaseOptions,
+  ): Promise<AttachmentImpl> {
     return await AttachmentImpl.createDatabase(this, uri, options);
   }
 
-  protected async internalDispose(): Promise<void> {
+  protected override async internalDispose(): Promise<void> {
     return await Promise.resolve();
   }
 }

@@ -20,21 +20,24 @@ export class ResultSetImpl extends AbstractResultSet {
     _options?: ExecuteQueryOptions,
   ): Promise<ResultSetImpl> {
     const resultSet = new ResultSetImpl(statement, transaction);
+
     await statement.dataWriter(statement.attachment, transaction, statement.inBuffer, parameters);
+
     resultSet.cursor = await statement.attachment.protocol!.openCursor(
       transaction.transactionHandle!,
       statement.statementHandle!,
       statement.inBuffer,
     );
+
     return resultSet;
   }
 
-  protected async internalClose(): Promise<void> {
+  protected override async internalClose(): Promise<void> {
     await this.statement.attachment.protocol!.closeCursor(this.statement.statementHandle!);
     this.cursor = undefined;
   }
 
-  protected async internalFetch(options?: FetchOptions): Promise<{ finished: boolean; rows: any[][] }> {
+  protected override async internalFetch(options?: FetchOptions): Promise<{ finished: boolean; rows: any[][] }> {
     if (this.delayedError) {
       const delayedError = this.delayedError;
       this.delayedError = undefined;

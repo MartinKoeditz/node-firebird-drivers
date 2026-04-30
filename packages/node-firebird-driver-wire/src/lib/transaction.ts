@@ -16,21 +16,21 @@ export class TransactionImpl extends AbstractTransaction {
     return transaction;
   }
 
-  protected async internalCommit(): Promise<void> {
+  protected override async internalCommit(): Promise<void> {
     await this.attachment.protocol!.commit(this.transactionHandle!);
     this.transactionHandle = undefined;
   }
 
-  protected async internalCommitRetaining(): Promise<void> {
+  protected override async internalCommitRetaining(): Promise<void> {
     await this.attachment.protocol!.commitRetaining(this.transactionHandle!);
   }
 
-  protected async internalRollback(): Promise<void> {
+  protected override async internalRollback(): Promise<void> {
     await this.attachment.protocol!.rollback(this.transactionHandle!);
     this.transactionHandle = undefined;
   }
 
-  protected async internalRollbackRetaining(): Promise<void> {
+  protected override async internalRollbackRetaining(): Promise<void> {
     await this.attachment.protocol!.rollbackRetaining(this.transactionHandle!);
   }
 }

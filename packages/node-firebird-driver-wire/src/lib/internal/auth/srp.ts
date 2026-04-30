@@ -1,4 +1,4 @@
-import { randomBytes, createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 const SRP_KEY_SIZE = 128;
 const SRP_SALT_SIZE = 32;
@@ -19,9 +19,11 @@ function sha1(...parts: Buffer[]): Buffer {
 
 function hash(algorithm: string, ...parts: Buffer[]): Buffer {
   const digest = createHash(algorithm.toLowerCase());
+
   for (const part of parts) {
     digest.update(part);
   }
+
   return digest.digest();
 }
 
@@ -34,6 +36,7 @@ function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
     if ((currentExponent & 1n) === 1n) {
       result = (result * currentBase) % modulus;
     }
+
     currentExponent >>= 1n;
     currentBase = (currentBase * currentBase) % modulus;
   }
@@ -47,9 +50,11 @@ function bigIntFromBytes(value: Buffer): bigint {
 
 function stripLeadingZeroes(value: Buffer): Buffer {
   let offset = 0;
+
   while (offset < value.length - 1 && value[offset] === 0) {
     offset++;
   }
+
   return value.subarray(offset);
 }
 
@@ -59,17 +64,21 @@ function bigIntToBytes(value: bigint): Buffer {
   }
 
   let hex = value.toString(16);
+
   if (hex.length % 2 !== 0) {
     hex = `0${hex}`;
   }
+
   return stripLeadingZeroes(Buffer.from(hex, 'hex'));
 }
 
 function pad(value: bigint): Buffer {
   const bytes = bigIntToBytes(value);
+
   if (bytes.length > SRP_KEY_SIZE) {
     return bytes.subarray(bytes.length - SRP_KEY_SIZE);
   }
+
   return bytes;
 }
 
@@ -146,6 +155,7 @@ export class SrpClientSession {
     );
 
     this.sessionKey = sessionKey;
+
     return Buffer.from(proof.toString('hex').toUpperCase(), 'ascii');
   }
 }

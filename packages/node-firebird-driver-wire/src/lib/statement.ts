@@ -17,6 +17,7 @@ export class StatementImpl extends AbstractStatement {
   inBuffer = Buffer.alloc(0);
   dataWriter: DataWriter = async () => undefined;
   dataReader: DataReader = async () => [];
+
   private readonly labelsPromise: Promise<string[]>;
   private readonly typePromise: Promise<StatementType>;
 
@@ -57,19 +58,20 @@ export class StatementImpl extends AbstractStatement {
     statement.inBuffer = Buffer.alloc(metadata.inputMessageLength);
     statement.dataWriter = createDataWriter(createDescriptors(metadata.inputColumns));
     statement.dataReader = createDataReader(createDescriptors(metadata.outputColumns));
+
     return statement;
   }
 
-  protected async internalDispose(): Promise<void> {
+  protected override async internalDispose(): Promise<void> {
     await this.attachment.protocol!.freeStatement(this.statementHandle!);
     this.statementHandle = undefined;
   }
 
-  protected async internalExecuteTransaction(_transaction: TransactionImpl): Promise<TransactionImpl> {
+  protected override async internalExecuteTransaction(_transaction: TransactionImpl): Promise<TransactionImpl> {
     throw new Error('Unimplemented method: executeTransaction.');
   }
 
-  protected async internalExecute(
+  protected override async internalExecute(
     transaction: TransactionImpl,
     parameters?: any[],
     _options?: ExecuteOptions,
@@ -107,7 +109,7 @@ export class StatementImpl extends AbstractStatement {
     return output ? await this.dataReader(this.attachment, transaction, output) : [];
   }
 
-  protected async internalExecuteQuery(
+  protected override async internalExecuteQuery(
     transaction: TransactionImpl,
     parameters?: any[],
     options?: ExecuteQueryOptions,
@@ -115,11 +117,11 @@ export class StatementImpl extends AbstractStatement {
     return await ResultSetImpl.open(this, transaction, parameters, options);
   }
 
-  async setCursorName(cursorName: string): Promise<void> {
+  override async setCursorName(cursorName: string): Promise<void> {
     await this.attachment.protocol!.setCursorName(this.statementHandle!, cursorName);
   }
 
-  async getExecPathText(): Promise<string | undefined> {
+  override async getExecPathText(): Promise<string | undefined> {
     const infoRet = await this.attachment.protocol!.getSqlInfo(
       this.statementHandle!,
       Buffer.from([statementInfo.sqlExecPathBlrText]),
@@ -137,11 +139,11 @@ export class StatementImpl extends AbstractStatement {
     return infoRet.subarray(3, 3 + size).toString('utf8');
   }
 
-  get columnLabels(): Promise<string[]> {
+  override get columnLabels(): Promise<string[]> {
     return this.labelsPromise;
   }
 
-  get type(): Promise<StatementType> {
+  override get type(): Promise<StatementType> {
     return this.typePromise;
   }
 }

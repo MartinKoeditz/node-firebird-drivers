@@ -56,7 +56,7 @@ export class BlobStreamImpl extends AbstractBlobStream {
     return blobStream;
   }
 
-  protected async internalGetLength(): Promise<number> {
+  protected override async internalGetLength(): Promise<number> {
     const infoRet = await this.attachment.protocol!.getBlobInfo(this.blobHandle!, BLOB_LENGTH_INFO_ITEMS);
 
     if (infoRet[0] != blobInfo.totalLength) {
@@ -64,20 +64,21 @@ export class BlobStreamImpl extends AbstractBlobStream {
     }
 
     const size = getPortableInteger(infoRet.subarray(1), 2);
+
     return getPortableInteger(infoRet.subarray(3), size);
   }
 
-  protected async internalClose(): Promise<void> {
+  protected override async internalClose(): Promise<void> {
     await this.attachment.protocol!.closeBlob(this.blobHandle!);
     this.blobHandle = undefined;
   }
 
-  protected async internalCancel(): Promise<void> {
+  protected override async internalCancel(): Promise<void> {
     await this.attachment.protocol!.cancelBlob(this.blobHandle!);
     this.blobHandle = undefined;
   }
 
-  protected async internalSeek(offset: number, whence?: BlobSeekWhence): Promise<number> {
+  protected override async internalSeek(offset: number, whence?: BlobSeekWhence): Promise<number> {
     this.readBuffer = Buffer.alloc(0);
     this.eofPending = false;
     this.eofReached = false;
@@ -87,10 +88,11 @@ export class BlobStreamImpl extends AbstractBlobStream {
     const seekOffset = mode === BlobSeekWhence.CURRENT ? this.position + offset : offset;
     const position = await this.attachment.protocol!.seekBlob(this.blobHandle!, seekMode, seekOffset);
     this.position = position;
+
     return position;
   }
 
-  protected async internalRead(buffer: Buffer): Promise<number> {
+  protected override async internalRead(buffer: Buffer): Promise<number> {
     while (this.readBuffer.length < buffer.length && !this.eofPending && !this.eofReached) {
       const response = await this.attachment.protocol!.getSegment(this.blobHandle!, MAX_SEGMENT_SIZE);
       const segmentData = Buffer.concat(decodePackedBlobSegments(response.data));
@@ -134,7 +136,7 @@ export class BlobStreamImpl extends AbstractBlobStream {
     return readBytes;
   }
 
-  protected async internalWrite(buffer: Buffer): Promise<void> {
+  protected override async internalWrite(buffer: Buffer): Promise<void> {
     while (buffer.length > 0) {
       const writingBytes = Math.min(buffer.length, MAX_SEGMENT_SIZE);
       await this.attachment.protocol!.putSegment(this.blobHandle!, buffer.subarray(0, writingBytes));
@@ -143,7 +145,7 @@ export class BlobStreamImpl extends AbstractBlobStream {
     }
   }
 
-  get isValid(): boolean {
+  override get isValid(): boolean {
     return !!this.blobHandle && this.attachment.isValid;
   }
 }
