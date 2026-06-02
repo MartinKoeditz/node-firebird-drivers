@@ -1156,7 +1156,7 @@ export function runCommonTests(client: Client) {
         rs.defaultFetchOptions = { fetchSize: 5 };
 
         expect((await rs.fetch()).length).toBe(2);
-        expect(rs.fetch()).rejects.toBeTruthy();
+        await expect(rs.fetch()).rejects.toBeTruthy();
 
         await rs.close();
 
