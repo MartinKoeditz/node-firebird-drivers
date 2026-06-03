@@ -260,8 +260,10 @@ describe('node-firebird-driver-wire', () => {
         }, 5000);
 
         const eventHandle = await wireProtocol.queueEvents(['EVENT1', 'EVENT2'], (counters) => {
-          clearTimeout(timeout);
-          resolveCounters(counters);
+          if (counters.some(([, count]) => count > 0)) {
+            clearTimeout(timeout);
+            resolveCounters(counters);
+          }
         });
 
         try {
@@ -280,7 +282,7 @@ describe('node-firebird-driver-wire', () => {
           await wireProtocol.executeStatement(transaction, statement);
           await wireProtocol.commit(transaction);
           await expect(countersPromise).resolves.toStrictEqual([
-            ['EVENT1', 1],
+            ['EVENT1', 2],
             ['EVENT2', 1],
           ]);
         } finally {

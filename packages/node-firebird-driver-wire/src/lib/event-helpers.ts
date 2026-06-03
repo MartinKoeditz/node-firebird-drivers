@@ -11,7 +11,9 @@ export function buildEventBlock(names: readonly string[]): Buffer {
 
     parts.push(Buffer.from([encodedName.length]));
     parts.push(encodedName);
-    parts.push(Buffer.alloc(4));
+    const count = Buffer.alloc(4);
+    count.writeUInt32LE(1);
+    parts.push(count);
   }
 
   return Buffer.concat(parts);

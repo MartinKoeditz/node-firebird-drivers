@@ -1,21 +1,21 @@
 import { buildEventBlock, calculateEventCounts, getEventHost, parseAuxiliaryPort } from '../lib/event-helpers';
 
 describe('event helpers', () => {
-  test('builds an event block with encoded names and zero counters', () => {
+  test('builds an event block with encoded names and initial counters', () => {
     const block = buildEventBlock(['EVENT1', 'EVENT2']);
 
     expect(block[0]).toBe(1);
     expect(block[1]).toBe(6);
     expect(block.subarray(2, 8).toString('utf8')).toBe('EVENT1');
-    expect(block.readUInt32LE(8)).toBe(0);
+    expect(block.readUInt32LE(8)).toBe(1);
   });
 
   test('calculates counter deltas from event buffers', () => {
     const previous = buildEventBlock(['EVENT1', 'EVENT2']);
     const current = Buffer.from(previous);
 
-    current.writeUInt32LE(3, 8);
-    current.writeUInt32LE(5, 19);
+    current.writeUInt32LE(1 + 3, 8);
+    current.writeUInt32LE(1 + 5, 19);
 
     expect(calculateEventCounts(previous, current, ['EVENT1', 'EVENT2'])).toEqual([
       ['EVENT1', 3],
