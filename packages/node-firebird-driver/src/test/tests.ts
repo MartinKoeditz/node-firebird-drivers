@@ -376,10 +376,11 @@ export function runCommonTests(client: Client) {
           });
 
           if (Array.from(eventsMap.values()).every((obj) => obj.count >= obj.expected)) {
-            if (events) {
-              await events.cancel();
-              expect(events.isValid).toBeFalsy();
+            const eventsToCancel = events;
+            if (eventsToCancel) {
               events = null!;
+              await eventsToCancel.cancel();
+              expect(eventsToCancel.isValid).toBeFalsy();
             }
           }
         };
