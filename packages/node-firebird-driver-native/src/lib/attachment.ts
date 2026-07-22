@@ -81,6 +81,10 @@ export class AttachmentImpl extends AbstractAttachment {
     attachment.charSetForNONE = options?.charSetForNONE ?? 'utf8';
 
     if (options?.defaultCharSet) {
+      // Only take this path when defaultCharSet is explicitly requested, rather than always
+      // creating databases through executeCreateDatabase: that API takes a bare SQL statement
+      // with no DPB, so forcedWrite/role/setDatabaseReadWriteMode (DPB-only, no CREATE DATABASE
+      // clause exists for them) would silently stop working for every caller below.
       const stmt = buildCreateDatabaseStatement(uri, options);
 
       return await client.statusAction(async (status) => {
